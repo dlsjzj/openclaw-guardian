@@ -11,7 +11,7 @@ struct FeishuCredentials {
         let configPath = NSHomeDirectory() + "/.openclaw/openclaw.json"
         var appId = ""
         var appSecret = ""
-        let userOpenId = "ou_975dc23daa3e73992e35ec29af92a1cb"
+        var userOpenId = ""
 
         if let data = FileManager.default.contents(atPath: configPath),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -19,11 +19,13 @@ struct FeishuCredentials {
            let feishu = channels["feishu"] as? [String: Any] {
             appId = (feishu["appId"] as? String) ?? ""
             appSecret = (feishu["appSecret"] as? String) ?? ""
+            userOpenId = (feishu["userOpenId"] as? String) ?? ""
         }
 
         // Fallback: try env vars
         if appId.isEmpty { appId = ProcessInfo.processInfo.environment["FEISHU_APP_ID"] ?? "" }
         if appSecret.isEmpty { appSecret = ProcessInfo.processInfo.environment["FEISHU_APP_SECRET"] ?? "" }
+        if userOpenId.isEmpty { userOpenId = ProcessInfo.processInfo.environment["FEISHU_USER_OPEN_ID"] ?? "" }
 
         self.appId = appId
         self.appSecret = appSecret
@@ -31,7 +33,7 @@ struct FeishuCredentials {
     }
 
     var isConfigured: Bool {
-        !appId.isEmpty && !appSecret.isEmpty
+        !appId.isEmpty && !appSecret.isEmpty && !userOpenId.isEmpty
     }
 }
 

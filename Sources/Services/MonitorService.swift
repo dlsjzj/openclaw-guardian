@@ -6,10 +6,17 @@ class MonitorService: ObservableObject {
     @Published var recentFixes: [FixResult] = []
     @Published var isMonitoring: Bool = false
     @Published var gatewayUptime: String = "—"
+    
+    // MARK: - Rate Limit Status
+    @Published var fixAttemptsUsed: Int = 0
+    @Published var fixAttemptsMax: Int = 3
+    @Published var isRateLimited: Bool = false
+    @Published var rateLimitRemainingSeconds: Int? = nil
 
     private var logWatcher: LogWatcher?
     private var healthTimer: Timer?
     private var uptimeTimer: Timer?
+    private var rateLimitTimer: Timer?
     private let healthChecker = HealthChecker()
     private let fixExecutor = FixExecutor()
     private let feishuNotifier = FeishuNotifier()
@@ -23,6 +30,7 @@ class MonitorService: ObservableObject {
         startLogWatching()
         startHealthCheck()
         startUptimeCheck()
+        startRateLimitUpdate()
     }
 
     func stop() {
@@ -30,6 +38,16 @@ class MonitorService: ObservableObject {
         logWatcher?.stop()
         healthTimer?.invalidate()
         uptimeTimer?.invalidate()
+        rateLimitTimer?.invalidate()
+    }
+
+    private func startRateLimitUpdate() {
+        // Initial update
+        updateRateLimitStatus()
+        // Update every 5 seconds to keep UI in sync
+        rateLimitTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.updateRateLimitStatus()
+        }
     }
 
     func forceFixNow() {
@@ -42,8 +60,18 @@ class MonitorService: ObservableObject {
                     status = .healthy
                     onStatusChange?(.healthy)
                 }
+                // Update rate limit status
+                updateRateLimitStatus()
             }
         }
+    }
+    
+    private func updateRateLimitStatus() {
+        let status = fixExecutor.getRateLimitStatus()
+        fixAttemptsUsed = status.attemptsUsed
+        fixAttemptsMax = status.maxAttempts
+        isRateLimited = status.isLimited
+        rateLimitRemainingSeconds = status.nextAvailableIn
     }
 
     func clearHistory() {
@@ -186,6 +214,8 @@ class MonitorService: ObservableObject {
                     let result = await fixExecutor.fixGateway()
                     await MainActor.run {
                         recentFixes.insert(result, at: 0)
+                        if recentFixes.count > 20 { recentFixes.removeLast() }
+                        updateRateLimitStatus()
                     }
                 }
                 return

@@ -121,7 +121,14 @@ Sources/
 ```bash
 openclaw gateway restart
 ```
-限流：每轮最多重启 3 次，间隔 >30s 才会再次重启。防止 Gateway 反复重启。
+
+**限流机制（重要）：**
+- **每轮最多重启 3 次** —— 防止无限重启
+- **两次重启间隔 ≥ 30 秒** —— 防抖动
+- **5 分钟冷却期** —— 连续 3 次失败后进入冷却，之后重置计数
+- **UI 实时显示** —— 状态栏显示当前已用次数和限流状态
+
+限流状态会在「操作」Tab 中实时显示，限流期间「立即修复」按钮会被禁用。
 
 ### 飞书通知（FeishuNotifier）
 
@@ -178,11 +185,23 @@ task.arguments = ["-c", cmd]
   "channels": {
     "feishu": {
       "appId": "cli_xxx",
-      "appSecret": "xxx"
+      "appSecret": "xxx",
+      "userOpenId": "ou_xxx"
     }
   }
 }
 ```
+
+**配置项说明：**
+- `appId` - 飞书应用的 App ID
+- `appSecret` - 飞书应用的 App Secret
+- `userOpenId` - 接收通知的用户 Open ID
+
+**环境变量回退：**
+如果配置文件不存在，会尝试读取环境变量：
+- `FEISHU_APP_ID`
+- `FEISHU_APP_SECRET`
+- `FEISHU_USER_OPEN_ID`
 
 ### Gateway 路径
 

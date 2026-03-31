@@ -23,6 +23,9 @@ swiftc -o "$BIN" \
   "$PROJECT_DIR/Sources/Services/HealthChecker.swift" \
   "$PROJECT_DIR/Sources/Services/FixExecutor.swift" \
   "$PROJECT_DIR/Sources/Services/MonitorService.swift" \
+  "$PROJECT_DIR/Sources/Services/SelfChecker.swift" \
+  "$PROJECT_DIR/Sources/Services/FeishuNotifier.swift" \
+  "$PROJECT_DIR/Sources/Services/BackgroundMonitor.swift" \
   "$PROJECT_DIR/Sources/Views/StatusBarView.swift" \
   "$PROJECT_DIR/Sources/App/AppDelegate.swift" \
   "$PROJECT_DIR/Sources/App/main.swift"

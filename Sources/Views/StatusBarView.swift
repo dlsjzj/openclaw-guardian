@@ -75,12 +75,35 @@ struct StatusBarView: View {
     // MARK: - Status Card
 
     private var statusCard: some View {
-        HStack(spacing: 16) {
-            statusItem(icon: "heart.fill", title: "Gateway", value: monitorService.status.displayName, color: statusColor)
-            Divider().frame(height: 40)
-            statusItem(icon: "clock", title: "运行时长", value: monitorService.gatewayUptime.isEmpty ? "—" : monitorService.gatewayUptime, color: .blue)
-            Divider().frame(height: 40)
-            statusItem(icon: "list.bullet", title: "事件数", value: "\(monitorService.recentEvents.count)", color: .purple)
+        VStack(spacing: 8) {
+            HStack(spacing: 16) {
+                statusItem(icon: "heart.fill", title: "Gateway", value: monitorService.status.displayName, color: statusColor)
+                Divider().frame(height: 40)
+                statusItem(icon: "clock", title: "运行时长", value: monitorService.gatewayUptime.isEmpty ? "—" : monitorService.gatewayUptime, color: .blue)
+                Divider().frame(height: 40)
+                statusItem(icon: "list.bullet", title: "事件数", value: "\(monitorService.recentEvents.count)", color: .purple)
+            }
+            
+            // Rate limit indicator
+            HStack(spacing: 6) {
+                Image(systemName: monitorService.isRateLimited ? "exclamationmark.triangle.fill" : "arrow.clockwise.circle.fill")
+                    .font(.caption2)
+                    .foregroundColor(monitorService.isRateLimited ? .red : .green)
+                
+                if monitorService.isRateLimited {
+                    let remainingMins = (monitorService.rateLimitRemainingSeconds ?? 300) / 60
+                    Text("限流中: 冷却剩余 \(remainingMins) 分钟")
+                        .font(.caption2)
+                        .foregroundColor(.red)
+                } else {
+                    Text("自动修复: \(monitorService.fixAttemptsUsed)/\(monitorService.fixAttemptsMax)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+            }
+            .padding(.horizontal, 4)
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 16)
@@ -263,11 +286,15 @@ struct StatusBarView: View {
         VStack(spacing: 10) {
             Text("手动操作").font(.caption).foregroundColor(.secondary).frame(maxWidth: .infinity, alignment: .leading)
 
+            let remainingMins = (monitorService.rateLimitRemainingSeconds ?? 0) / 60
             actionButton(
-                icon: "wrench.and.screwdriver.fill",
-                title: "立即修复",
-                subtitle: "重启 Gateway",
-                color: .accentColor
+                icon: monitorService.isRateLimited ? "lock.fill" : "wrench.and.screwdriver.fill",
+                title: monitorService.isRateLimited ? "修复受限" : "立即修复",
+                subtitle: monitorService.isRateLimited
+                    ? "冷却剩余 \(remainingMins) 分钟"
+                    : "重启 Gateway (\(monitorService.fixAttemptsUsed)/\(monitorService.fixAttemptsMax))",
+                color: monitorService.isRateLimited ? .gray : .accentColor,
+                disabled: monitorService.isRateLimited
             ) {
                 monitorService.forceFixNow()
             }
@@ -299,7 +326,7 @@ struct StatusBarView: View {
         .padding(.top, 8)
     }
 
-    private func actionButton(icon: String, title: String, subtitle: String, color: Color, action: @escaping () -> Void) -> some View {
+    private func actionButton(icon: String, title: String, subtitle: String, color: Color, disabled: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack {
                 Image(systemName: icon)
@@ -308,14 +335,15 @@ struct StatusBarView: View {
                     Text(subtitle).font(.caption2).opacity(0.7)
                 }
                 Spacer()
-                Image(systemName: "arrow.right.circle")
+                Image(systemName: disabled ? "lock" : "arrow.right.circle")
             }
             .padding(10)
-            .background(color.opacity(0.12))
-            .foregroundColor(color)
+            .background(color.opacity(disabled ? 0.05 : 0.12))
+            .foregroundColor(color.opacity(disabled ? 0.5 : 1.0))
             .cornerRadius(8)
         }
         .buttonStyle(.plain)
+        .disabled(disabled)
     }
 
     private func tabButton(title: String, icon: String, tag: Int) -> some View {
