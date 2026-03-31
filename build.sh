@@ -19,6 +19,7 @@ swiftc -o "$BIN" \
   -framework SwiftUI \
   -framework Foundation \
   "$PROJECT_DIR/Sources/Models/HealthStatus.swift" \
+  "$PROJECT_DIR/Sources/Models/ErrorClassifier.swift" \
   "$PROJECT_DIR/Sources/Services/LogWatcher.swift" \
   "$PROJECT_DIR/Sources/Services/HealthChecker.swift" \
   "$PROJECT_DIR/Sources/Services/FixExecutor.swift" \

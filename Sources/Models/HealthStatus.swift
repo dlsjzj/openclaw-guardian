@@ -31,6 +31,8 @@ struct LogEvent: Identifiable, Equatable {
     let level: String
     let message: String
     let rawLine: String
+    /// 智能错误分类
+    var category: ErrorCategory = .normal
 
     var formattedTime: String {
         let formatter = DateFormatter()

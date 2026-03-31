@@ -83,13 +83,18 @@ struct StatusBarView: View {
                 Divider().frame(height: 40)
                 statusItem(icon: "list.bullet", title: "事件数", value: "\(monitorService.recentEvents.count)", color: .purple)
             }
-            
+
+            // API Error Stats
+            if monitorService.apiErrorStats.total > 0 {
+                apiErrorStatsRow
+            }
+
             // Rate limit indicator
             HStack(spacing: 6) {
                 Image(systemName: monitorService.isRateLimited ? "exclamationmark.triangle.fill" : "arrow.clockwise.circle.fill")
                     .font(.caption2)
                     .foregroundColor(monitorService.isRateLimited ? .red : .green)
-                
+
                 if monitorService.isRateLimited {
                     let remainingMins = (monitorService.rateLimitRemainingSeconds ?? 300) / 60
                     Text("限流中: 冷却剩余 \(remainingMins) 分钟")
@@ -100,13 +105,54 @@ struct StatusBarView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
-                
+
                 Spacer()
             }
             .padding(.horizontal, 4)
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 16)
+    }
+
+    /// API 错误统计行
+    private var apiErrorStatsRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                if monitorService.apiErrorStats.authErrors > 0 {
+                    errorChip(label: "认证", count: monitorService.apiErrorStats.authErrors, color: .orange, icon: "key.fill")
+                }
+                if monitorService.apiErrorStats.rateLimitErrors > 0 {
+                    errorChip(label: "限流", count: monitorService.apiErrorStats.rateLimitErrors, color: .yellow, icon: "speedometer")
+                }
+                if monitorService.apiErrorStats.overloadedErrors > 0 {
+                    errorChip(label: "过载", count: monitorService.apiErrorStats.overloadedErrors, color: .yellow, icon: "bolt.fill")
+                }
+                if monitorService.apiErrorStats.pluginErrors > 0 {
+                    errorChip(label: "插件", count: monitorService.apiErrorStats.pluginErrors, color: .orange, icon: "puzzlepiece.extension")
+                }
+                if monitorService.apiErrorStats.networkErrors > 0 {
+                    errorChip(label: "网络", count: monitorService.apiErrorStats.networkErrors, color: .orange, icon: "wifi.exclamationmark")
+                }
+                if monitorService.apiErrorStats.gatewayErrors > 0 {
+                    errorChip(label: "崩溃", count: monitorService.apiErrorStats.gatewayErrors, color: .red, icon: "flame.fill")
+                }
+                Spacer()
+            }
+        }
+    }
+
+    private func errorChip(label: String, count: Int, color: Color, icon: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 9))
+            Text("\(label):\(count)")
+                .font(.caption2)
+        }
+        .foregroundColor(color)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(color.opacity(0.12))
+        .cornerRadius(4)
     }
 
     private func statusItem(icon: String, title: String, value: String, color: Color) -> some View {
@@ -146,6 +192,19 @@ struct StatusBarView: View {
                 .background(levelColor(event.level).opacity(0.2))
                 .foregroundColor(levelColor(event.level))
                 .cornerRadius(3)
+            // 错误分类标签（仅非 normal 时显示）
+            if event.category != .normal && event.category != .warning {
+                Text(event.category.rawValue)
+                    .font(.system(size: 8, weight: .bold))
+                    .padding(.horizontal, 3).padding(.vertical, 1)
+                    .background(categoryColor(event.category).opacity(0.2))
+                    .foregroundColor(categoryColor(event.category))
+                    .cornerRadius(3)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 3)
+                            .stroke(categoryColor(event.category).opacity(0.3), lineWidth: 0.5)
+                    )
+            }
             Text(event.message).font(.caption).lineLimit(2)
         }
         .padding(.horizontal, 4).padding(.vertical, 2)
@@ -400,6 +459,20 @@ struct StatusBarView: View {
         case "WARN", "WARNING":            return "WARN"
         case "INFO":                       return "INFO"
         default:                           return "LOG"
+        }
+    }
+
+    /// 错误分类对应的颜色
+    private func categoryColor(_ category: ErrorCategory) -> Color {
+        switch category {
+        case .gatewayCrash, .gatewayUnhealthy: return .red
+        case .authError:      return .orange
+        case .rateLimit:      return .yellow
+        case .overloaded:     return .yellow
+        case .pluginError:    return .orange
+        case .networkError:   return .orange
+        case .warning:        return .yellow
+        case .normal:         return .gray
         }
     }
 

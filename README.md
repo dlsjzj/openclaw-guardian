@@ -9,10 +9,12 @@
 ## 功能特性
 
 - 🟢 **实时监控** — 每 30 秒检查 Gateway `/health` API
+- 🧠 **智能错误分类** — 区分 Gateway 崩溃 / 认证失败 / 限流 / 过载 / 插件错误 / 网络错误
 - 🔍 **日志分析** — 实时读取 `~/.openclaw/logs/gateway.log`，识别 OOM / 崩溃 / 端口冲突
-- 🔧 **自动修复** — 检测到故障自动重启 Gateway（最多 3 次）
+- 🔧 **精准修复** — 仅 Gateway 级别故障才触发自动重启，API 错误不再误重启
 - 📲 **飞书通知** — 故障时主动发飞书消息（凭证从 OpenClaw 配置读取）
 - ⚡ **AI 活动监控** — 后台 Tab 实时显示 AI 是空闲 / 处理中 / 卡住了
+- 📊 **API 错误统计** — 实时统计认证/限流/过载/插件/网络错误数量
 - 📊 **自检报告** — 一键检查 Docker / 记忆文件 / Skills / Cron / 备份状态
 - 🔄 **开机自启** — LaunchAgent 配置
 
@@ -90,12 +92,13 @@ Sources/
 │   ├── main.swift              # 入口：手动 NSApplication.shared + NSApp.setActivationPolicy
 │   └── AppDelegate.swift        # NSStatusItem + NSPopover 管理，绑定 Tab 视图
 ├── Models/
-│   └── HealthStatus.swift      # HealthLevel 枚举 + FixEvent 记录结构
+│   ├── HealthStatus.swift      # HealthLevel 枚举 + FixEvent 记录结构 + LogEvent（含 category）
+│   └── ErrorClassifier.swift   # 智能错误分类引擎 + APIErrorStats 统计
 ├── Services/
 │   ├── HealthChecker.swift       # GET http://127.0.0.1:18789/health → ok=true?
 │   ├── LogWatcher.swift         # 尾读 gateway.log，检测 OOM/crash/port conflict
 │   ├── FixExecutor.swift         # 执行 openclaw gateway restart，限流 3 次/轮
-│   ├── MonitorService.swift      # 定时调度器（30s 检查）+ 事件聚合 + 飞书通知触发
+│   ├── MonitorService.swift      # 定时调度器（30s 检查）+ 智能分类 + 飞书通知触发
 │   ├── SelfChecker.swift        # Docker/记忆文件/Skills/Cron/备份 5 项检查
 │   ├── FeishuNotifier.swift     # 读取 openclaw.json → 获取 appId/appSecret → 发飞书
 │   └── BackgroundMonitor.swift  # 尾读日志 → 检测 AI 空闲/处理中/卡住
@@ -122,13 +125,19 @@ Sources/
 openclaw gateway restart
 ```
 
-**限流机制（重要）：**
-- **每轮最多重启 3 次** —— 防止无限重启
-- **两次重启间隔 ≥ 30 秒** —— 防抖动
-- **5 分钟冷却期** —— 连续 3 次失败后进入冷却，之后重置计数
-- **UI 实时显示** —— 状态栏显示当前已用次数和限流状态
+**精准修复策略（重要改进）：**
 
-限流状态会在「操作」Tab 中实时显示，限流期间「立即修复」按钮会被禁用。
+Guardian 不再对插件/API 错误盲目重启。智能错误分类器（ErrorClassifier）将错误分为 8 类，仅 Gateway 级别错误才触发重启：
+
+| 错误分类 | 触发重启？ | 处理方式 |
+|---------|-----------|---------|
+| Gateway 崩溃 (OOM/panic/端口冲突) | ✅ 是 | 自动重启 Gateway |
+| 认证失败 (401/authentication_error) | ❌ 否 | warning 状态，需人工检查配置 |
+| 限流 (429/rate-limit) | ❌ 否 | warning 状态，等待自动恢复 |
+| 过载 (529/overloaded) | ❌ 否 | warning 状态，等待自动恢复 |
+| 插件错误 (summarize/embedding 失败) | ❌ 否 | warning 状态，不影响 Gateway |
+| 网络错误 (fetch failed/ECONNREFUSED) | ❌ 否 | warning 状态，可能是暂时的 |
+| 警告 (timeout/retry) | ❌ 否 | warning 状态 |
 
 ### 飞书通知（FeishuNotifier）
 
