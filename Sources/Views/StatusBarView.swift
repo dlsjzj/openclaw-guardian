@@ -377,80 +377,133 @@ struct StatusBarView: View {
 
     private var backgroundTab: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // AI 活动状态卡片
-                activityCard
+            VStack(spacing: 16) {
+                // 主状态卡片
+                aiStatusCard
 
-                Divider()
-
-                // Gateway 日志活动
-                Text("最近日志活动")
-                    .font(.headline)
-
-                Text("每 3 秒自动刷新，读取 gateway.log 尾行")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                // 详细状态
+                HStack(spacing: 12) {
+                    detailPill(icon: "checkmark.circle", label: "最后完成", value: backgroundMonitor.lastEndedAt, color: .green)
+                    detailPill(icon: "arrow.right.circle", label: "最后新任务", value: backgroundMonitor.lastDispatchAt, color: .blue)
+                }
 
                 Spacer()
 
                 HStack {
                     Circle()
-                        .fill(activityDotColor)
+                        .fill(dotColor)
                         .frame(width: 8, height: 8)
-                    Text("更新于 \(formatTime(backgroundMonitor.lastUpdate))")
+                    Text("每 3 秒自动刷新")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Spacer()
-                    Button("刷新") {
-                        backgroundMonitor.refresh()
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
+                    Text(formatTime(backgroundMonitor.lastUpdate))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
             .padding(12)
         }
     }
 
-    private var activityCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
+    private var aiStatusCard: some View {
+        VStack(spacing: 12) {
+            // 大图标 + 状态文字
+            ZStack {
                 Circle()
-                    .fill(activityDotColor)
-                    .frame(width: 12, height: 12)
-                Text(backgroundMonitor.activity.label)
-                    .font(.headline)
-                Spacer()
+                    .fill(cardBgColor)
+                    .frame(width: 80, height: 80)
+
+                switch backgroundMonitor.activity {
+                case .idle:
+                    Image(systemName: "moon.fill")
+                        .font(.system(size: 32))
+                        .foregroundColor(.gray)
+                case .busy:
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .frame(width: 40, height: 40)
+                case .stuck:
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 32))
+                        .foregroundColor(.red)
+                }
             }
 
-            Text(backgroundMonitor.activity.detail)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+            Text(activityLabel)
+                .font(.title2)
+                .fontWeight(.bold)
+                .foregroundColor(activityTextColor)
 
-            Text("通过读取 gateway.log 判断 AI 活动状态")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .padding(.top, 2)
+            if backgroundMonitor.activity == .idle {
+                Text("已空闲 \(backgroundMonitor.idleMinutes) 分钟")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            } else if backgroundMonitor.activity == .stuck {
+                Text("超过 \(backgroundMonitor.idleMinutes) 分钟未响应")
+                    .font(.subheadline)
+                    .foregroundColor(.red)
+            } else {
+                Text("正在处理你的请求")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
         }
-        .padding(14)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+        .background(cardBgColor.opacity(0.15))
+        .cornerRadius(16)
+    }
+
+    private func detailPill(icon: String, label: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .foregroundColor(color)
+                Text(label)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Text(value)
+                .font(.system(.body, design: .monospaced))
+                .fontWeight(.medium)
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(activityBgColor)
-        .cornerRadius(12)
+        .padding(10)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
     }
 
-    private var activityDotColor: Color {
-        switch backgroundMonitor.activity.color {
-        case "green": return .green
-        case "yellow": return .yellow
-        default: return .gray
+    private var activityLabel: String {
+        switch backgroundMonitor.activity {
+        case .idle: return "空闲"
+        case .busy: return "处理中"
+        case .stuck: return "卡住了"
         }
     }
 
-    private var activityBgColor: Color {
-        switch backgroundMonitor.activity.color {
-        case "green": return Color.green.opacity(0.1)
-        case "yellow": return Color.yellow.opacity(0.1)
-        default: return Color.gray.opacity(0.08)
+    private var dotColor: Color {
+        switch backgroundMonitor.activity {
+        case .idle: return .gray
+        case .busy: return .green
+        case .stuck: return .red
+        }
+    }
+
+    private var cardBgColor: Color {
+        switch backgroundMonitor.activity {
+        case .idle: return .gray
+        case .busy: return .green
+        case .stuck: return .red
+        }
+    }
+
+    private var activityTextColor: Color {
+        switch backgroundMonitor.activity {
+        case .idle: return .secondary
+        case .busy: return .primary
+        case .stuck: return .red
         }
     }
 
