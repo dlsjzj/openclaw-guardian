@@ -377,35 +377,26 @@ struct StatusBarView: View {
 
     private var backgroundTab: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("运行中的进程")
-                    .font(.headline)
-                    .padding(.bottom, 4)
+            VStack(alignment: .leading, spacing: 16) {
+                // AI 活动状态卡片
+                activityCard
 
-                if backgroundMonitor.processes.isEmpty {
-                    HStack {
-                        Spacer()
-                        VStack(spacing: 8) {
-                            Image(systemName: "cpu")
-                                .font(.largeTitle)
-                                .foregroundColor(.gray)
-                            Text("暂无进程")
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(.top, 30)
-                        Spacer()
-                    }
-                } else {
-                    ForEach(backgroundMonitor.processes) { proc in
-                        processRow(proc)
-                    }
-                }
+                Divider()
+
+                // Gateway 日志活动
+                Text("最近日志活动")
+                    .font(.headline)
+
+                Text("每 3 秒自动刷新，读取 gateway.log 尾行")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
 
                 Spacer()
 
                 HStack {
-                    Image(systemName: "clock")
-                        .foregroundColor(.secondary)
+                    Circle()
+                        .fill(activityDotColor)
+                        .frame(width: 8, height: 8)
                     Text("更新于 \(formatTime(backgroundMonitor.lastUpdate))")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -421,32 +412,46 @@ struct StatusBarView: View {
         }
     }
 
-    private func processRow(_ proc: RunningProcess) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private var activityCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Image(systemName: "app.fill")
-                    .foregroundColor(.accentColor)
-                Text(proc.name)
-                    .font(.system(.body, design: .monospaced))
-                    .fontWeight(.medium)
+                Circle()
+                    .fill(activityDotColor)
+                    .frame(width: 12, height: 12)
+                Text(backgroundMonitor.activity.label)
+                    .font(.headline)
                 Spacer()
-                Text("PID \(proc.pid)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
-            HStack(spacing: 16) {
-                Label("CPU \(proc.cpu)%", systemImage: "cpu")
-                    .font(.caption)
-                Label("MEM \(proc.mem)%", systemImage: "memorychip")
-                    .font(.caption)
-                Label(proc.uptime, systemImage: "clock")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+
+            Text(backgroundMonitor.activity.detail)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+
+            Text("通过读取 gateway.log 判断 AI 活动状态")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .padding(.top, 2)
         }
-        .padding(10)
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(8)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(activityBgColor)
+        .cornerRadius(12)
+    }
+
+    private var activityDotColor: Color {
+        switch backgroundMonitor.activity.color {
+        case "green": return .green
+        case "yellow": return .yellow
+        default: return .gray
+        }
+    }
+
+    private var activityBgColor: Color {
+        switch backgroundMonitor.activity.color {
+        case "green": return Color.green.opacity(0.1)
+        case "yellow": return Color.yellow.opacity(0.1)
+        default: return Color.gray.opacity(0.08)
+        }
     }
 
     private func formatTime(_ date: Date) -> String {
