@@ -77,12 +77,10 @@ class BackgroundMonitor: ObservableObject {
         }
 
         // Use grep to pre-filter lines so we don't read entire log into Swift
+        let shellCmd = "tail -n 120 \"\(path)\" | grep -E 'feishu: tool call:|agent_end|dispatching to agent'"
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = [
-            "-c",
-            #"tail -n 120 '#(path)' | grep -E 'feishu: tool call:|agent_end|dispatching to agent'"#
-        ]
+        task.arguments = ["-c", shellCmd]
 
         let pipe = Pipe()
         task.standardOutput = pipe
