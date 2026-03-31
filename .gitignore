@@ -1,0 +1,18 @@
+# Build output
+.build/
+*.o
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+
+# macOS
+.DS_Store
+
+# Logs (contain sensitive info)
+logs/
+
+# Secrets (credentials should come from openclaw.json, not here)
+*.pem
+*.key
+.env
