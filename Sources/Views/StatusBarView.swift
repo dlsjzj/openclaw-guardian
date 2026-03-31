@@ -7,6 +7,7 @@ struct StatusBarView: View {
     @State private var isChecking = false
 
     private let selfChecker = SelfChecker()
+    @StateObject private var backgroundMonitor = BackgroundMonitor()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,6 +22,7 @@ struct StatusBarView: View {
                     tabButton(title: "修复", icon: "wrench", tag: 1)
                     tabButton(title: "自检", icon: "checkmark.shield", tag: 2)
                     tabButton(title: "操作", icon: "gearshape", tag: 3)
+                    tabButton(title: "后台", icon: "cpu", tag: 4)
                 }
                 .padding(.horizontal, 8)
                 .padding(.top, 6)
@@ -34,6 +36,7 @@ struct StatusBarView: View {
                     case 1: fixesTab
                     case 2: selfCheckTab
                     case 3: actionsTab
+                    case 4: backgroundTab
                     default: eventsTab
                     }
                 }
@@ -217,6 +220,7 @@ struct StatusBarView: View {
             if checkResults.isEmpty {
                 runSelfCheck()
             }
+            backgroundMonitor.start()
         }
     }
 
@@ -369,5 +373,85 @@ struct StatusBarView: View {
         case "INFO":                       return "INFO"
         default:                           return "LOG"
         }
+    }
+
+    private var backgroundTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("运行中的进程")
+                    .font(.headline)
+                    .padding(.bottom, 4)
+
+                if backgroundMonitor.processes.isEmpty {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 8) {
+                            Image(systemName: "cpu")
+                                .font(.largeTitle)
+                                .foregroundColor(.gray)
+                            Text("暂无进程")
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.top, 30)
+                        Spacer()
+                    }
+                } else {
+                    ForEach(backgroundMonitor.processes) { proc in
+                        processRow(proc)
+                    }
+                }
+
+                Spacer()
+
+                HStack {
+                    Image(systemName: "clock")
+                        .foregroundColor(.secondary)
+                    Text("更新于 \(formatTime(backgroundMonitor.lastUpdate))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button("刷新") {
+                        backgroundMonitor.refresh()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    private func processRow(_ proc: RunningProcess) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "app.fill")
+                    .foregroundColor(.accentColor)
+                Text(proc.name)
+                    .font(.system(.body, design: .monospaced))
+                    .fontWeight(.medium)
+                Spacer()
+                Text("PID \(proc.pid)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            HStack(spacing: 16) {
+                Label("CPU \(proc.cpu)%", systemImage: "cpu")
+                    .font(.caption)
+                Label("MEM \(proc.mem)%", systemImage: "memorychip")
+                    .font(.caption)
+                Label(proc.uptime, systemImage: "clock")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(10)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
+    }
+
+    private func formatTime(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: date)
     }
 }
