@@ -7,25 +7,29 @@ enum AIActivity: String {
 }
 
 /// Monitors OpenClaw AI activity by watching gateway.log.
-/// Key signals from log:
-///   dispatching to agent  → new message arrived
-///   agent_end             → AI finished processing
-///   tool_call             → AI is running a tool (subtype of busy)
 ///
-/// State machine:
-///   idle     ← no dispatching seen for a while
-///   busy     ← dispatching seen, agent_end not yet
-///   stuck    ← dispatching seen, no agent_end for >2min
+/// Key log signals (chronologically within one turn):
+///   dispatching to agent  → new message arrived at AI
+///   tool call: <name>    → AI is actively doing work  ← most reliable busy signal
+///   agent_end            → AI finished the turn
+///
+/// Detection logic:
+///   busy     ← tool call found in last 120 lines
+///   idle     ← no tool call found, but agent_end is recent (< 2 min ago)
+///   stuck    ← no tool call AND no agent_end seen for > 2 min after dispatching
+///
 class BackgroundMonitor: ObservableObject {
     @Published var activity: AIActivity = .idle
-    @Published var lastEndedAt: String = "—"     // "HH:mm:ss"
-    @Published var lastDispatchAt: String = "—"  // "HH:mm:ss"
+    @Published var lastEndedAt: String = "—"
+    @Published var lastToolCallAt: String = "—"
+    @Published var lastDispatchAt: String = "—"
     @Published var idleMinutes: Int = 0
     @Published var lastUpdate: Date = Date()
 
-    // Persistent state across refreshes (survives timer gaps)
+    // Persistent across refresh calls
     private var lastKnownAgentEnd: Date?
-    private var awaitingAgentEnd: Bool = false
+    private var lastKnownDispatch: Date?
+    private var dispatchInProgress: Bool = false
 
     private var timer: Timer?
     private let logPath: String
@@ -36,8 +40,6 @@ class BackgroundMonitor: ObservableObject {
     }
 
     func start() {
-        // Use a timer that fires reliably even in background
-        // .common mode fires during scrolling/UI updates; add for modal sheets
         timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.refresh()
         }
@@ -52,11 +54,10 @@ class BackgroundMonitor: ObservableObject {
     func refresh() {
         let path = logPath
         guard FileManager.default.fileExists(atPath: path) else {
-            setUI(activity: .idle, endedAt: "—", dispatchAt: "—", idleMins: 0)
+            setUI(activity: .idle, endedAt: "—", toolAt: "—", dispatchAt: "—", idleMins: 0)
             return
         }
 
-        // Read last 120 lines — wider window to catch all relevant signals
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/tail")
         task.arguments = ["-n", "120", path]
@@ -73,92 +74,98 @@ class BackgroundMonitor: ObservableObject {
 
         let lines = output.components(separatedBy: "\n").filter { !$0.isEmpty }
 
-        // Scan chronologically (oldest → newest)
-        // Keep only the LATEST instance of each signal
+        // Track newest signals (scan newest-first, take first occurrence of each)
         var latestAgentEndTime: String? = nil
         var latestDispatchTime: String? = nil
         var latestToolCallTime: String? = nil
 
-        for line in lines {
+        for line in lines.reversed() {
             let ts = extractTimestamp(from: line)
+            if ts == nil { continue }
 
-            if ts != nil {
-                if line.contains("agent_end") && latestAgentEndTime == nil {
-                    latestAgentEndTime = ts
-                }
-                if line.contains("dispatching to agent") && latestDispatchTime == nil {
-                    latestDispatchTime = ts
-                }
-                if line.contains("tool call:") && latestToolCallTime == nil {
-                    latestToolCallTime = ts
-                }
+            if latestAgentEndTime == nil && line.contains("agent_end") {
+                latestAgentEndTime = ts
+            } else if latestDispatchTime == nil && line.contains("dispatching to agent") {
+                latestDispatchTime = ts
+            } else if latestToolCallTime == nil && line.contains("tool call:") {
+                latestToolCallTime = ts
+            }
+
+            // Stop once we have all three
+            if latestAgentEndTime != nil && latestDispatchTime != nil && latestToolCallTime != nil {
+                break
             }
         }
 
-        DispatchQueue.main.async {
-            self.lastUpdate = Date()
+        let now = Date()
 
-            let now = Date()
+        // Update persistent state
+        if let endStr = latestAgentEndTime, let d = parseDate(endStr) {
+            lastKnownAgentEnd = d
+        }
+        if let dispStr = latestDispatchTime, let d = parseDate(dispStr) {
+            lastKnownDispatch = d
+            dispatchInProgress = true
+        }
 
-            // Update persistent agent_end tracking
-            if let endStr = latestAgentEndTime, let endDate = self.parseDate(endStr) {
-                self.lastKnownAgentEnd = endDate
-                self.awaitingAgentEnd = false
-            }
+        // Determine activity
+        var newActivity: AIActivity = .idle
+        var newIdleMins: Int = 0
 
-            // State determination
-            if latestDispatchTime != nil {
-                // New message arrived — must be busy or stuck
-                self.awaitingAgentEnd = true
-
-                if let endDate = self.lastKnownAgentEnd {
-                    let mins = Int(now.timeIntervalSince(endDate) / 60)
-                    if mins >= 2 {
-                        self.activity = .stuck
-                        self.idleMinutes = mins
-                    } else {
-                        self.activity = .busy
-                        self.idleMinutes = mins
-                    }
+        if latestToolCallTime != nil {
+            // Tool call seen in window → AI is actively working
+            newActivity = .busy
+        } else if let dispatch = lastKnownDispatch, let end = lastKnownAgentEnd {
+            // No tool call — check if we are stuck
+            if dispatch > end {
+                // Dispatch is newer than last agent_end: dispatch arrived, no tool yet
+                let mins = Int(now.timeIntervalSince(dispatch) / 60)
+                if mins >= 2 {
+                    newActivity = .stuck
+                    newIdleMins = mins
                 } else {
-                    // No prior agent_end seen → very recent dispatch, actively starting
-                    self.activity = .busy
-                    self.idleMinutes = 0
-                }
-            } else if latestAgentEndTime != nil {
-                // No dispatching, but agent has ended recently
-                self.activity = .idle
-                if let endDate = self.lastKnownAgentEnd {
-                    self.idleMinutes = max(0, Int(now.timeIntervalSince(endDate) / 60))
-                } else {
-                    self.idleMinutes = 0
+                    // Dispatch is very recent (< 2 min), no tool yet → still busy
+                    newActivity = .busy
                 }
             } else {
-                // No relevant signals in window at all
-                if let lastEnd = self.lastKnownAgentEnd {
-                    let mins = Int(now.timeIntervalSince(lastEnd) / 60)
-                    if mins >= 2 {
-                        self.activity = .stuck
-                        self.idleMinutes = mins
-                    } else {
-                        self.activity = .idle
-                        self.idleMinutes = mins
-                    }
+                // agent_end is newer than dispatch: previous cycle ended
+                newIdleMins = max(0, Int(now.timeIntervalSince(end) / 60))
+                if newIdleMins >= 2 {
+                    newActivity = .stuck
                 } else {
-                    self.activity = .idle
-                    self.idleMinutes = 0
+                    newActivity = .idle
                 }
+                dispatchInProgress = false
             }
-
-            self.lastEndedAt = latestAgentEndTime ?? self.lastEndedAt
-            self.lastDispatchAt = latestDispatchTime ?? self.lastDispatchAt
+        } else if let end = lastKnownAgentEnd {
+            // Only agent_end known, no dispatching
+            newIdleMins = max(0, Int(now.timeIntervalSince(end) / 60))
+            newActivity = newIdleMins >= 2 ? .stuck : .idle
+        } else if let dispatch = lastKnownDispatch {
+            // Only dispatch known, no agent_end ever
+            let mins = Int(now.timeIntervalSince(dispatch) / 60)
+            newIdleMins = mins
+            newActivity = mins >= 2 ? .stuck : .busy
+        } else {
+            // Nothing known
+            newActivity = .idle
+            newIdleMins = 0
         }
+
+        setUI(
+            activity: newActivity,
+            endedAt: latestAgentEndTime ?? "—",
+            toolAt: latestToolCallTime ?? "—",
+            dispatchAt: latestDispatchTime ?? lastDispatchAt,
+            idleMins: newIdleMins
+        )
     }
 
-    private func setUI(activity: AIActivity, endedAt: String, dispatchAt: String, idleMins: Int) {
+    private func setUI(activity: AIActivity, endedAt: String, toolAt: String, dispatchAt: String, idleMins: Int) {
         DispatchQueue.main.async {
             self.activity = activity
             self.lastEndedAt = endedAt
+            self.lastToolCallAt = toolAt
             self.lastDispatchAt = dispatchAt
             self.idleMinutes = idleMins
             self.lastUpdate = Date()
@@ -172,7 +179,7 @@ class BackgroundMonitor: ObservableObject {
               let timeRange = Range(match.range(at: 1), in: line) else {
             return nil
         }
-        return String(line[timeRange])  // full "YYYY-MM-DDTHH:mm:ss"
+        return String(line[timeRange])
     }
 
     private func parseDate(_ ts: String) -> Date? {

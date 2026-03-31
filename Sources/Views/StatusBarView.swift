@@ -383,9 +383,10 @@ struct StatusBarView: View {
 
                 // 详细状态
                 HStack(spacing: 12) {
+                    detailPill(icon: "hammer.fill", label: "最后工具", value: backgroundMonitor.lastToolCallAt, color: .orange)
                     detailPill(icon: "checkmark.circle", label: "最后完成", value: backgroundMonitor.lastEndedAt, color: .green)
-                    detailPill(icon: "arrow.right.circle", label: "最后新任务", value: backgroundMonitor.lastDispatchAt, color: .blue)
                 }
+                detailPill(icon: "arrow.right.circle", label: "最后新任务", value: backgroundMonitor.lastDispatchAt, color: .blue)
 
                 Spacer()
 
