@@ -131,25 +131,26 @@ class BackgroundMonitor: ObservableObject {
         var newActivity: AIActivity = .idle
         var newIdleMins: Int = 0
 
-        if latestToolCallTime != nil {
-            // Real tool call present → busy
-            newActivity = .busy
-        } else if let dispatch = lastKnownDispatch, let end = lastKnownAgentEnd {
-            if dispatch > end {
-                // Dispatch newer than last agent_end
-                let mins = Int(now.timeIntervalSince(dispatch) / 60)
-                newActivity = mins >= 2 ? .stuck : .busy
-                newIdleMins = mins
-            } else {
-                // Normal: dispatch ended, awaiting next
-                newIdleMins = max(0, Int(now.timeIntervalSince(end) / 60))
+        // Parse tool call and agent_end timestamps for comparison
+        let toolCallDate: Date? = latestToolCallTime.flatMap { parseDate($0) }
+        let agentEndDate: Date? = latestAgentEndTime.flatMap { parseDate($0) }
+
+        if let toolDate = toolCallDate {
+            // tool call exists — check if agent_end is newer (meaning work is done)
+            if let endDate = agentEndDate, endDate > toolDate {
+                // agent_end after tool call → work actually finished
+                newIdleMins = max(0, Int(now.timeIntervalSince(endDate) / 60))
                 newActivity = newIdleMins >= 2 ? .stuck : .idle
-                dispatchArrivedAfterEnd = false
+            } else {
+                // No newer agent_end → still processing
+                newActivity = .busy
             }
-        } else if let end = lastKnownAgentEnd {
-            newIdleMins = max(0, Int(now.timeIntervalSince(end) / 60))
+        } else if let endDate = agentEndDate {
+            // No tool call, have agent_end
+            newIdleMins = max(0, Int(now.timeIntervalSince(endDate) / 60))
             newActivity = newIdleMins >= 2 ? .stuck : .idle
         } else if let dispatch = lastKnownDispatch {
+            // No tool call, no agent_end, but have dispatch
             let mins = Int(now.timeIntervalSince(dispatch) / 60)
             newIdleMins = mins
             newActivity = mins >= 2 ? .stuck : .busy
