@@ -71,13 +71,14 @@ struct StatusBarView: View {
             }
             .buttonStyle(.plain)
             .help("自检")
-            Toggle("", isOn: Binding(
-                get: { monitorService.isMonitoring },
-                set: { if $0 { monitorService.start() } else { monitorService.stop() } }
-            ))
-            .toggleStyle(.switch)
-            .scaleEffect(0.7)
-            .help(monitorService.isMonitoring ? "监控中，点击停止" : "已停止，点击开始")
+
+            Button(action: { NSApplication.shared.terminate(nil) }) {
+                Image(systemName: "power")
+                    .font(.body)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("退出 Guardian")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

@@ -14,8 +14,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "shield.fill", accessibilityDescription: "OpenClaw Guardian")
-            button.contentTintColor = .controlAccentColor
+            let initConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+                .applying(.init(paletteColors: [.controlAccentColor]))
+            if let img = NSImage(systemSymbolName: "shield.fill", accessibilityDescription: "OpenClaw Guardian") {
+                button.image = img.withSymbolConfiguration(initConfig)
+            }
             button.action = #selector(togglePopover)
             button.target = self
         }
@@ -79,10 +82,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+            .applying(.init(paletteColors: [color]))
         if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "OpenClaw Guardian") {
-            let coloredImage = image.withSymbolConfiguration(config)
-            button.image = coloredImage
-            button.contentTintColor = color
+            button.image = image.withSymbolConfiguration(config)
         }
     }
 }
