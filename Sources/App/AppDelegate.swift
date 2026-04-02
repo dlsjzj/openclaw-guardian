@@ -14,7 +14,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            let initConfig = NSImage.SymbolConfiguration(pointSize: 22, weight: .medium)
+            let initConfig = NSImage.SymbolConfiguration(pointSize: 20, weight: .medium)
                 .applying(.init(paletteColors: [.controlAccentColor]))
             if let img = NSImage(systemSymbolName: "shield.fill", accessibilityDescription: "OpenClaw Guardian") {
                 button.image = img.withSymbolConfiguration(initConfig)
@@ -81,7 +81,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             color = .systemGray
         }
 
-        let config = NSImage.SymbolConfiguration(pointSize: 22, weight: .medium)
+        let config = NSImage.SymbolConfiguration(pointSize: 20, weight: .medium)
             .applying(.init(paletteColors: [color]))
         if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "OpenClaw Guardian") {
             button.image = image.withSymbolConfiguration(config)
