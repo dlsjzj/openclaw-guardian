@@ -14,7 +14,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "shield.checkered", accessibilityDescription: "OpenClaw Guardian")
+            button.image = NSImage(systemSymbolName: "shield.fill", accessibilityDescription: "OpenClaw Guardian")
             button.action = #selector(togglePopover)
             button.target = self
         }
