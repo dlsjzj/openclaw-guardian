@@ -168,8 +168,14 @@ class BackgroundMonitor: ObservableObject {
         } else if let dispatch = lastKnownDispatch {
             // No tool call, no agent_end, but dispatch seen
             let dispatchAgeSecs = Int(now.timeIntervalSince(dispatch))
-            newActivity = dispatchAgeSecs >= 120 ? .stuck : .busy
-            newIdleSecs = dispatchAgeSecs
+            // If dispatch is very recent (< 60s), likely work just started
+            if dispatchAgeSecs < 60 {
+                newActivity = .busy
+                newIdleSecs = dispatchAgeSecs
+            } else {
+                newActivity = dispatchAgeSecs >= 120 ? .stuck : .busy
+                newIdleSecs = dispatchAgeSecs
+            }
         } else {
             newActivity = .idle
             newIdleSecs = 0
