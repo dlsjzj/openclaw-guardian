@@ -127,56 +127,66 @@ class BackgroundMonitor: ObservableObject {
             dispatchArrivedAfterEnd = true
         }
 
-        // Determine state — simpler, more robust
-        // Key principle: show "busy" if any recent tool activity, otherwise idle/stuck
+        // Determine state — dispatch-centric, session-aware
+        //
+        // Principle: the DISPATCH is the ground truth.
+        // Everything (tool call, agent_end) is measured relative to the latest dispatch.
+        //
+        // - dispatch + tool call (tool after dispatch) → busy
+        // - dispatch + agent_end (end after dispatch) → idle
+        // - dispatch + >2min + no tool + no end → stuck
+        // - no dispatch → check agent_end age
+        //
+        let toolCallDate: Date? = latestToolCallTime.flatMap { parseDate($0) }
+        let agentEndDate: Date? = latestAgentEndTime.flatMap { parseDate($0) }
+        let dispatchDate: Date? = latestDispatchTime.flatMap { parseDate($0) }
+
         var newActivity: AIActivity = .idle
         var newIdleSecs: Int = 0
 
-        let toolCallDate: Date? = latestToolCallTime.flatMap { parseDate($0) }
-        let agentEndDate: Date? = latestAgentEndTime.flatMap { parseDate($0) }
+        if let dispDate = dispatchDate {
+            // A dispatch exists — this is a live session
+            let dispatchAgeSecs = Int(now.timeIntervalSince(dispDate))
 
-        if let toolDate = toolCallDate {
-            let toolAgeSecs = Int(now.timeIntervalSince(toolDate))
-            if toolAgeSecs < 60 {
-                // Recent tool activity (< 60s) → busy
-                newActivity = .busy
-                newIdleSecs = toolAgeSecs
-            } else {
-                // Tool call was > 60s ago
-                if let endDate = agentEndDate {
+            // Check if any work actually started (tool call after dispatch)
+            if let toolDate = toolCallDate, toolDate >= dispDate {
+                // Tool call came AFTER dispatch → AI IS working
+                let toolAgeSecs = Int(now.timeIntervalSince(toolDate))
+                if let endDate = agentEndDate, endDate > toolDate {
+                    // agent_end after this tool call → work cycle complete
                     let endAgeSecs = Int(now.timeIntervalSince(endDate))
-                    if endAgeSecs < 120 {
-                        // agent_end within 2 min → idle
-                        newActivity = .idle
-                        newIdleSecs = endAgeSecs
-                    } else {
-                        // > 2 min since any activity → stuck
-                        newActivity = .stuck
-                        newIdleSecs = endAgeSecs
-                    }
+                    newActivity = endAgeSecs >= 120 ? .stuck : .idle
+                    newIdleSecs = endAgeSecs
                 } else {
-                    // No agent_end, tool was > 60s ago
-                    newActivity = .stuck
+                    // Tool call is the latest event → busy
+                    newActivity = .busy
                     newIdleSecs = toolAgeSecs
                 }
             }
+            // Check if work already completed (agent_end after dispatch)
+            else if let endDate = agentEndDate, endDate >= dispDate {
+                let endAgeSecs = Int(now.timeIntervalSince(endDate))
+                newActivity = endAgeSecs >= 120 ? .stuck : .idle
+                newIdleSecs = endAgeSecs
+            }
+            // dispatch exists but no tool call, no recent end → waiting or stuck
+            else {
+                if dispatchAgeSecs >= 120 {
+                    newActivity = .stuck
+                    newIdleSecs = dispatchAgeSecs
+                } else {
+                    // Dispatch arrived, waiting for tool call → normal pre-work wait
+                    newActivity = .busy
+                    newIdleSecs = dispatchAgeSecs
+                }
+            }
         } else if let endDate = agentEndDate {
-            // No tool call, but have agent_end
+            // No dispatch → check idle time since last work ended
             let endAgeSecs = Int(now.timeIntervalSince(endDate))
             newActivity = endAgeSecs >= 120 ? .stuck : .idle
             newIdleSecs = endAgeSecs
-        } else if let dispatch = lastKnownDispatch {
-            // No tool call, no agent_end, but dispatch seen
-            let dispatchAgeSecs = Int(now.timeIntervalSince(dispatch))
-            // If dispatch is very recent (< 60s), likely work just started
-            if dispatchAgeSecs < 60 {
-                newActivity = .busy
-                newIdleSecs = dispatchAgeSecs
-            } else {
-                newActivity = dispatchAgeSecs >= 120 ? .stuck : .busy
-                newIdleSecs = dispatchAgeSecs
-            }
         } else {
+            // Nothing at all → idle
             newActivity = .idle
             newIdleSecs = 0
         }
