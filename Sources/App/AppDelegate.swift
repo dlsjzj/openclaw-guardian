@@ -15,6 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "shield.fill", accessibilityDescription: "OpenClaw Guardian")
+            button.contentTintColor = .controlAccentColor
             button.action = #selector(togglePopover)
             button.target = self
         }
