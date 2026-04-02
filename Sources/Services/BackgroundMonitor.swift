@@ -127,36 +127,52 @@ class BackgroundMonitor: ObservableObject {
             dispatchArrivedAfterEnd = true
         }
 
-        // Determine state
+        // Determine state — simpler, more robust
+        // Key principle: show "busy" if any recent tool activity, otherwise idle/stuck
         var newActivity: AIActivity = .idle
-        var newIdleMins: Int = 0
+        var newIdleSecs: Int = 0
 
-        // Parse tool call and agent_end timestamps for comparison
         let toolCallDate: Date? = latestToolCallTime.flatMap { parseDate($0) }
         let agentEndDate: Date? = latestAgentEndTime.flatMap { parseDate($0) }
 
         if let toolDate = toolCallDate {
-            // tool call exists — check if agent_end is newer (meaning work is done)
-            if let endDate = agentEndDate, endDate > toolDate {
-                // agent_end after tool call → work actually finished
-                newIdleMins = max(0, Int(now.timeIntervalSince(endDate) / 60))
-                newActivity = newIdleMins >= 2 ? .stuck : .idle
-            } else {
-                // No newer agent_end → still processing
+            let toolAgeSecs = Int(now.timeIntervalSince(toolDate))
+            if toolAgeSecs < 60 {
+                // Recent tool activity (< 60s) → busy
                 newActivity = .busy
+                newIdleSecs = toolAgeSecs
+            } else {
+                // Tool call was > 60s ago
+                if let endDate = agentEndDate {
+                    let endAgeSecs = Int(now.timeIntervalSince(endDate))
+                    if endAgeSecs < 120 {
+                        // agent_end within 2 min → idle
+                        newActivity = .idle
+                        newIdleSecs = endAgeSecs
+                    } else {
+                        // > 2 min since any activity → stuck
+                        newActivity = .stuck
+                        newIdleSecs = endAgeSecs
+                    }
+                } else {
+                    // No agent_end, tool was > 60s ago
+                    newActivity = .stuck
+                    newIdleSecs = toolAgeSecs
+                }
             }
         } else if let endDate = agentEndDate {
-            // No tool call, have agent_end
-            newIdleMins = max(0, Int(now.timeIntervalSince(endDate) / 60))
-            newActivity = newIdleMins >= 2 ? .stuck : .idle
+            // No tool call, but have agent_end
+            let endAgeSecs = Int(now.timeIntervalSince(endDate))
+            newActivity = endAgeSecs >= 120 ? .stuck : .idle
+            newIdleSecs = endAgeSecs
         } else if let dispatch = lastKnownDispatch {
-            // No tool call, no agent_end, but have dispatch
-            let mins = Int(now.timeIntervalSince(dispatch) / 60)
-            newIdleMins = mins
-            newActivity = mins >= 2 ? .stuck : .busy
+            // No tool call, no agent_end, but dispatch seen
+            let dispatchAgeSecs = Int(now.timeIntervalSince(dispatch))
+            newActivity = dispatchAgeSecs >= 120 ? .stuck : .busy
+            newIdleSecs = dispatchAgeSecs
         } else {
             newActivity = .idle
-            newIdleMins = 0
+            newIdleSecs = 0
         }
 
         setUI(
@@ -164,7 +180,7 @@ class BackgroundMonitor: ObservableObject {
             endedAt: latestAgentEndTime ?? "—",
             toolAt: latestToolCallTime ?? "—",
             dispatchAt: latestDispatchTime ?? "—",
-            idleMins: newIdleMins
+            idleMins: newIdleSecs / 60
         )
     }
 
