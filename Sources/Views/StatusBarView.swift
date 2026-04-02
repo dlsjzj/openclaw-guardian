@@ -5,6 +5,7 @@ struct StatusBarView: View {
     @State private var selectedTab = 0
     @State private var checkResults: [CheckResult] = []
     @State private var isChecking = false
+    @State private var showSelfCheck = false
 
     private let selfChecker = SelfChecker()
     @StateObject private var backgroundMonitor = BackgroundMonitor()
@@ -16,13 +17,11 @@ struct StatusBarView: View {
             statusCard
             Divider()
             VStack(spacing: 0) {
-                // Custom tab bar
+                // Custom tab bar (3 tabs)
                 HStack(spacing: 0) {
                     tabButton(title: "事件", icon: "list.bullet", tag: 0)
-                    tabButton(title: "修复", icon: "wrench", tag: 1)
-                    tabButton(title: "自检", icon: "checkmark.shield", tag: 2)
-                    tabButton(title: "操作", icon: "gearshape", tag: 3)
-                    tabButton(title: "后台", icon: "cpu", tag: 4)
+                    tabButton(title: "操作", icon: "wrench.and.screwdriver", tag: 1)
+                    tabButton(title: "后台", icon: "cpu", tag: 2)
                 }
                 .padding(.horizontal, 8)
                 .padding(.top, 6)
@@ -33,10 +32,8 @@ struct StatusBarView: View {
                 Group {
                     switch selectedTab {
                     case 0: eventsTab
-                    case 1: fixesTab
-                    case 2: selfCheckTab
-                    case 3: actionsTab
-                    case 4: backgroundTab
+                    case 1: actionsTabMerged
+                    case 2: backgroundTab
                     default: eventsTab
                     }
                 }
@@ -46,27 +43,41 @@ struct StatusBarView: View {
         }
         .frame(width: 380, height: 480)
         .background(Color(NSColor.windowBackgroundColor))
+        .sheet(isPresented: $showSelfCheck) {
+            selfCheckSheet
+        }
     }
 
     // MARK: - Header
 
     private var headerView: some View {
-        HStack {
-            Image(systemName: "shield.checkered")
+        HStack(spacing: 12) {
+            Image(systemName: "shield.fill")
                 .font(.title2)
                 .foregroundColor(.accentColor)
-            Text("OpenClaw Guardian")
+            Text("Guardian")
                 .font(.headline)
             Spacer()
             Circle()
                 .fill(statusColor)
-                .frame(width: 10, height: 10)
+                .frame(width: 8, height: 8)
             Text(monitorService.status.displayName)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            Text(monitorService.isMonitoring ? "● 监控中" : "○ 已停止")
                 .font(.caption)
-                .foregroundColor(monitorService.isMonitoring ? .green : .gray)
+                .foregroundColor(.secondary)
+            Button(action: { showSelfCheck = true }) {
+                Image(systemName: "checkmark.shield")
+                    .font(.body)
+                    .foregroundColor(.accentColor)
+            }
+            .buttonStyle(.plain)
+            .help("自检")
+            Toggle("", isOn: Binding(
+                get: { monitorService.isMonitoring },
+                set: { if $0 { monitorService.start() } else { monitorService.stop() } }
+            ))
+            .toggleStyle(.switch)
+            .scaleEffect(0.7)
+            .help(monitorService.isMonitoring ? "监控中，点击停止" : "已停止，点击开始")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -210,22 +221,64 @@ struct StatusBarView: View {
         .padding(.horizontal, 4).padding(.vertical, 2)
     }
 
-    // MARK: - Fixes Tab
+    // MARK: - Actions Merged Tab (fixes + actions combined)
 
-    private var fixesTab: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
-                if monitorService.recentFixes.isEmpty {
-                    emptyState("暂无修复记录")
-                } else {
-                    ForEach(monitorService.recentFixes.prefix(20)) { fix in
-                        fixRow(fix)
+    private var actionsTabMerged: some View {
+        VStack(spacing: 0) {
+            // 上方：最近修复记录
+            VStack(alignment: .leading, spacing: 4) {
+                Text("最近修复").font(.caption).foregroundColor(.secondary)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 4)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        if monitorService.recentFixes.isEmpty {
+                            emptyState("暂无修复记录")
+                        } else {
+                            ForEach(monitorService.recentFixes.prefix(8)) { fix in
+                                fixRow(fix)
+                            }
+                        }
                     }
+                    .padding(.vertical, 2)
+                }
+                .frame(maxHeight: 140)
+            }
+
+            Divider()
+
+            // 下方：操作按钮
+            VStack(spacing: 8) {
+                let remainingMins = (monitorService.rateLimitRemainingSeconds ?? 300) / 60
+                actionButton(
+                    icon: monitorService.isRateLimited ? "lock.fill" : "wrench.and.screwdriver.fill",
+                    title: monitorService.isRateLimited ? "修复受限" : "立即修复",
+                    subtitle: monitorService.isRateLimited
+                        ? "冷却剩余 \(remainingMins) 分钟"
+                        : "重启 Gateway (\(monitorService.fixAttemptsUsed)/\(monitorService.fixAttemptsMax))",
+                    color: monitorService.isRateLimited ? .gray : .accentColor,
+                    disabled: monitorService.isRateLimited
+                ) {
+                    monitorService.forceFixNow()
+                }
+
+                actionButton(
+                    icon: "trash",
+                    title: "清除历史",
+                    subtitle: "清空事件和修复记录",
+                    color: .red
+                ) {
+                    monitorService.clearHistory()
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.top, 8)
+
+            Spacer()
         }
+        .padding(.horizontal, 4)
     }
+
+    // MARK: - Fix Row
 
     private func fixRow(_ fix: FixResult) -> some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -237,18 +290,41 @@ struct StatusBarView: View {
                 Text(fix.formattedTime).font(.caption2).foregroundColor(.secondary)
             }
             if !fix.output.isEmpty {
-                Text(fix.output).font(.caption2).foregroundColor(.secondary).lineLimit(3)
+                Text(fix.output).font(.caption2).foregroundColor(.secondary).lineLimit(2)
             }
         }
-        .padding(.horizontal, 4).padding(.vertical, 4)
+        .padding(.horizontal, 6).padding(.vertical, 4)
         .background(fix.success ? Color.green.opacity(0.05) : Color.red.opacity(0.05))
         .cornerRadius(4)
     }
 
-    // MARK: - Self Check Tab
+    // MARK: - Action Button
 
-    private var selfCheckTab: some View {
-        VStack(spacing: 8) {
+    @ViewBuilder
+    private func actionButton(icon: String, title: String, subtitle: String, color: Color, disabled: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Image(systemName: icon)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.caption).fontWeight(.medium)
+                    Text(subtitle).font(.caption2).opacity(0.7)
+                }
+                Spacer()
+                Image(systemName: disabled ? "lock" : "arrow.right.circle")
+            }
+            .padding(10)
+            .background(color.opacity(disabled ? 0.05 : 0.12))
+            .foregroundColor(color.opacity(disabled ? 0.5 : 1.0))
+            .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+    }
+
+    // MARK: - Self Check Sheet
+
+    private var selfCheckSheet: some View {
+        VStack(spacing: 12) {
             HStack {
                 Text("自检报告")
                     .font(.headline)
@@ -256,8 +332,7 @@ struct StatusBarView: View {
                 Button(action: runSelfCheck) {
                     HStack(spacing: 4) {
                         if isChecking {
-                            ProgressView()
-                                .scaleEffect(0.6)
+                            ProgressView().scaleEffect(0.6)
                         } else {
                             Image(systemName: "arrow.clockwise")
                         }
@@ -272,18 +347,17 @@ struct StatusBarView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(isChecking)
+                Button("完成") { showSelfCheck = false }
+                    .padding(.horizontal, 8)
             }
 
             if checkResults.isEmpty && !isChecking {
-                VStack(spacing: 12) {
-                    Spacer()
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.largeTitle).foregroundColor(.secondary)
-                    Text("点击「刷新」开始自检")
-                        .font(.caption).foregroundColor(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                Spacer()
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.largeTitle).foregroundColor(.secondary)
+                Text("点击「刷新」开始自检")
+                    .font(.caption).foregroundColor(.secondary)
+                Spacer()
             } else {
                 ScrollView {
                     LazyVStack(spacing: 4) {
@@ -291,18 +365,15 @@ struct StatusBarView: View {
                             checkResultRow(result)
                         }
                     }
-                    .padding(.vertical, 4)
                 }
             }
-
-            Spacer()
         }
-        .padding(.top, 8)
+        .padding()
+        .frame(width: 340, height: 380)
         .onAppear {
             if checkResults.isEmpty {
                 runSelfCheck()
             }
-            backgroundMonitor.start()
         }
     }
 
@@ -337,72 +408,6 @@ struct StatusBarView: View {
                 self.isChecking = false
             }
         }
-    }
-
-    // MARK: - Actions Tab
-
-    private var actionsTab: some View {
-        VStack(spacing: 10) {
-            Text("手动操作").font(.caption).foregroundColor(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-
-            let remainingMins = (monitorService.rateLimitRemainingSeconds ?? 0) / 60
-            actionButton(
-                icon: monitorService.isRateLimited ? "lock.fill" : "wrench.and.screwdriver.fill",
-                title: monitorService.isRateLimited ? "修复受限" : "立即修复",
-                subtitle: monitorService.isRateLimited
-                    ? "冷却剩余 \(remainingMins) 分钟"
-                    : "重启 Gateway (\(monitorService.fixAttemptsUsed)/\(monitorService.fixAttemptsMax))",
-                color: monitorService.isRateLimited ? .gray : .accentColor,
-                disabled: monitorService.isRateLimited
-            ) {
-                monitorService.forceFixNow()
-            }
-
-            actionButton(
-                icon: "trash",
-                title: "清除历史",
-                subtitle: "清空事件和修复记录",
-                color: .red
-            ) {
-                monitorService.clearHistory()
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("自动监控").font(.caption).foregroundColor(.secondary)
-                HStack {
-                    Circle().fill(statusColor).frame(width: 8, height: 8)
-                    Text(monitorService.status.displayName).font(.caption)
-                    Spacer()
-                    Text("每30秒检查一次").font(.caption2).foregroundColor(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Spacer()
-        }
-        .padding(.top, 8)
-    }
-
-    private func actionButton(icon: String, title: String, subtitle: String, color: Color, disabled: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack {
-                Image(systemName: icon)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.caption).fontWeight(.medium)
-                    Text(subtitle).font(.caption2).opacity(0.7)
-                }
-                Spacer()
-                Image(systemName: disabled ? "lock" : "arrow.right.circle")
-            }
-            .padding(10)
-            .background(color.opacity(disabled ? 0.05 : 0.12))
-            .foregroundColor(color.opacity(disabled ? 0.5 : 1.0))
-            .cornerRadius(8)
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
     }
 
     private func tabButton(title: String, icon: String, tag: Int) -> some View {
