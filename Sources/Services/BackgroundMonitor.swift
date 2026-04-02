@@ -8,15 +8,15 @@ enum AIActivity: String {
 
 /// Detects AI activity from gateway.log.
 ///
-/// Real signals (must have specific prefix to avoid false matches):
-///   "tool call:"  → actual feishu tool invocation
-///   "agent_end"           → AI finished processing
+/// Real signals:
+///   "[plugins] agent_end"  → AI finished processing (NOT inside tool call params)
 ///   "dispatching to agent" → new message arrived
+///   "tool call:"           → feishu tool invocation (NOT inside another tool's params)
 ///
 /// State:
-///   busy   ← feishu tool call seen in last 120 lines (AI doing work NOW)
-///   idle   ← no feishu tool call; last agent_end < 2 min ago
-///   stuck  ← no feishu tool call AND > 2 min since any meaningful activity
+///   busy   ← dispatch + tool call started (even if prior agent_end exists)
+///   idle   ← dispatch ended cleanly, no new dispatch
+///   stuck  ← dispatch >2min with no work started
 ///
 class BackgroundMonitor: ObservableObject {
     @Published var activity: AIActivity = .idle
@@ -76,8 +76,11 @@ class BackgroundMonitor: ObservableObject {
             return
         }
 
-        // Use grep to pre-filter lines so we don't read entire log into Swift
-        let shellCmd = "tail -n 120 \"\(path)\" | grep -E 'tool call:|agent_end|dispatching to agent'"
+        // Use grep to pre-filter lines.
+        // BUG FIX: Use [plugins] prefix for agent_end to avoid matching "agent_end"
+        // appearing inside tool call command parameters (e.g., grep -E "agent_end").
+        // Also scan 500 lines instead of 120 to capture agent_end even with many tool calls.
+        let shellCmd = "tail -n 500 \"\(path)\" | grep -E '\\[plugins\\] agent_end|dispatching to agent|tool call:'"
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
         task.arguments = ["-c", shellCmd]
@@ -95,6 +98,10 @@ class BackgroundMonitor: ObservableObject {
         let lines = output.components(separatedBy: "\n").filter { !$0.isEmpty }
 
         // Scan newest-first; take first occurrence of each signal
+        // BUG FIX: Changed order — scan for tool call FIRST (most reliable indicator
+        // of active work), then dispatch, then agent_end. This avoids a subtle bug
+        // where old agent_end from previous session was incorrectly clearing busy
+        // state when a new tool call arrived.
         var latestAgentEndTime: String? = nil
         var latestDispatchTime: String? = nil
         var latestToolCallTime: String? = nil
@@ -103,15 +110,19 @@ class BackgroundMonitor: ObservableObject {
             let ts = extractTimestamp(from: line)
             if ts == nil { continue }
 
-            if latestAgentEndTime == nil && line.contains("agent_end") {
-                latestAgentEndTime = ts
+            // Scan tool call FIRST — most reliable signal of active work
+            if latestToolCallTime == nil && line.contains("tool call:") {
+                latestToolCallTime = ts
             } else if latestDispatchTime == nil && line.contains("dispatching to agent") {
                 latestDispatchTime = ts
-            } else if latestToolCallTime == nil && line.contains("tool call:") {
-                latestToolCallTime = ts
+            } else if latestAgentEndTime == nil && line.contains("[plugins] agent_end") {
+                // BUG FIX: Only match "[plugins] agent_end" to avoid false matches
+                // where "agent_end" appears inside command strings like:
+                // "command":"grep -E \"agent_end|...\""
+                latestAgentEndTime = ts
             }
 
-            if latestAgentEndTime != nil && latestDispatchTime != nil && latestToolCallTime != nil {
+            if latestToolCallTime != nil && latestDispatchTime != nil && latestAgentEndTime != nil {
                 break
             }
         }
@@ -127,15 +138,14 @@ class BackgroundMonitor: ObservableObject {
             dispatchArrivedAfterEnd = true
         }
 
-        // Determine state — dispatch-centric, session-aware
+        // Determine state — simplified, robust logic
         //
-        // Principle: the DISPATCH is the ground truth.
-        // Everything (tool call, agent_end) is measured relative to the latest dispatch.
+        // Key principle: if there's a dispatch and recent tool call activity
+        // (tool call AFTER dispatch), AI is busy. The tool call is the ground
+        // truth for "AI is doing something NOW".
         //
-        // - dispatch + tool call (tool after dispatch) → busy
-        // - dispatch + agent_end (end after dispatch) → idle
-        // - dispatch + >2min + no tool + no end → stuck
-        // - no dispatch → check agent_end age
+        // We NEVER use agent_end to clear a busy state when a new tool call
+        // has since arrived — tool call newer than agent_end means NEW work started.
         //
         let toolCallDate: Date? = latestToolCallTime.flatMap { parseDate($0) }
         let agentEndDate: Date? = latestAgentEndTime.flatMap { parseDate($0) }
@@ -145,50 +155,49 @@ class BackgroundMonitor: ObservableObject {
         var newIdleSecs: Int = 0
 
         if let dispDate = dispatchDate {
-            // A dispatch exists — this is a live session
+            // A dispatch exists — this is a live (or recent) session
             let dispatchAgeSecs = Int(now.timeIntervalSince(dispDate))
 
-            // Check if any work actually started (tool call after dispatch)
+            // Primary check: if there's a tool call AFTER dispatch, AI is busy
+            // (tool call is the strongest signal of active work)
             if let toolDate = toolCallDate, toolDate >= dispDate {
-                // Tool call came AFTER dispatch → AI IS working
                 let toolAgeSecs = Int(now.timeIntervalSince(toolDate))
-                if let endDate = agentEndDate, endDate > toolDate {
-                    // agent_end after this tool call → work cycle complete
+                newActivity = .busy
+                newIdleSecs = toolAgeSecs
+            }
+            // No tool call after this dispatch
+            else {
+                // Check if there's an agent_end for THIS dispatch (end after dispatch)
+                if let endDate = agentEndDate, endDate >= dispDate {
                     let endAgeSecs = Int(now.timeIntervalSince(endDate))
-                    newActivity = endAgeSecs >= 120 ? .stuck : .idle
+                    if endAgeSecs >= 120 {
+                        newActivity = .stuck
+                    } else {
+                        newActivity = .idle
+                    }
                     newIdleSecs = endAgeSecs
-                } else {
-                    // Tool call is the latest event → busy
-                    newActivity = .busy
-                    newIdleSecs = toolAgeSecs
+                }
+                // No tool call, no agent_end for this dispatch
+                else {
+                    if dispatchAgeSecs >= 120 {
+                        newActivity = .stuck
+                    } else {
+                        // Dispatch arrived but work hasn't started yet → waiting
+                        newActivity = .busy
+                    }
+                    newIdleSecs = dispatchAgeSecs
                 }
             }
-            // Check if work already completed (agent_end after dispatch)
-            else if let endDate = agentEndDate, endDate >= dispDate {
+        } else {
+            // No dispatch at all → check idle time since last agent_end
+            if let endDate = agentEndDate {
                 let endAgeSecs = Int(now.timeIntervalSince(endDate))
                 newActivity = endAgeSecs >= 120 ? .stuck : .idle
                 newIdleSecs = endAgeSecs
+            } else {
+                newActivity = .idle
+                newIdleSecs = 0
             }
-            // dispatch exists but no tool call, no recent end → waiting or stuck
-            else {
-                if dispatchAgeSecs >= 120 {
-                    newActivity = .stuck
-                    newIdleSecs = dispatchAgeSecs
-                } else {
-                    // Dispatch arrived, waiting for tool call → normal pre-work wait
-                    newActivity = .busy
-                    newIdleSecs = dispatchAgeSecs
-                }
-            }
-        } else if let endDate = agentEndDate {
-            // No dispatch → check idle time since last work ended
-            let endAgeSecs = Int(now.timeIntervalSince(endDate))
-            newActivity = endAgeSecs >= 120 ? .stuck : .idle
-            newIdleSecs = endAgeSecs
-        } else {
-            // Nothing at all → idle
-            newActivity = .idle
-            newIdleSecs = 0
         }
 
         setUI(
