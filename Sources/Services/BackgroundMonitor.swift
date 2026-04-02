@@ -9,7 +9,7 @@ enum AIActivity: String {
 /// Detects AI activity from gateway.log.
 ///
 /// Real signals (must have specific prefix to avoid false matches):
-///   "feishu: tool call:"  → actual feishu tool invocation
+///   "tool call:"  → actual feishu tool invocation
 ///   "agent_end"           → AI finished processing
 ///   "dispatching to agent" → new message arrived
 ///
@@ -77,7 +77,7 @@ class BackgroundMonitor: ObservableObject {
         }
 
         // Use grep to pre-filter lines so we don't read entire log into Swift
-        let shellCmd = "tail -n 120 \"\(path)\" | grep -E 'feishu: tool call:|agent_end|dispatching to agent'"
+        let shellCmd = "tail -n 120 \"\(path)\" | grep -E 'tool call:|agent_end|dispatching to agent'"
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
         task.arguments = ["-c", shellCmd]
@@ -107,7 +107,7 @@ class BackgroundMonitor: ObservableObject {
                 latestAgentEndTime = ts
             } else if latestDispatchTime == nil && line.contains("dispatching to agent") {
                 latestDispatchTime = ts
-            } else if latestToolCallTime == nil && line.contains("feishu: tool call:") {
+            } else if latestToolCallTime == nil && line.contains("tool call:") {
                 latestToolCallTime = ts
             }
 
