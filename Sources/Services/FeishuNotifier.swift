@@ -20,6 +20,12 @@ struct FeishuCredentials {
             appId = (feishu["appId"] as? String) ?? ""
             appSecret = (feishu["appSecret"] as? String) ?? ""
             userOpenId = (feishu["userOpenId"] as? String) ?? ""
+            // Fallback: extract open_id from allowFrom array (openclaw.json stores user open_id there)
+            if userOpenId.isEmpty,
+               let allowFrom = feishu["allowFrom"] as? [String],
+               let first = allowFrom.first {
+                userOpenId = first
+            }
         }
 
         // Fallback: try env vars
@@ -46,7 +52,14 @@ class FeishuNotifier {
         self.creds = FeishuCredentials()
     }
 
-    func notify(title: String, body: String) {
+    // MARK: - Public API
+
+    /// Sends a rich interactive card notification.
+    /// - Parameters:
+    ///   - title: Card header title
+    ///   - text: Markdown body content
+    ///   - template: "red" for errors/warnings, "green" for success, "blue" for info
+    func notify(title: String, body: String, template: String = "red") {
         guard creds.isConfigured else {
             print("[Feishu] Not configured: missing appId or appSecret")
             return
@@ -55,8 +68,25 @@ class FeishuNotifier {
             print("[Feishu] Failed to get access token")
             return
         }
-        sendMessage(token: token, title: title, body: body)
+        sendInteractiveCard(token: token, title: title, body: body, template: template)
     }
+
+    /// Convenience: sends a success card (green header).
+    func notifySuccess(title: String, body: String) {
+        notify(title: title, body: body, template: "green")
+    }
+
+    /// Convenience: sends an error card (red header).
+    func notifyError(title: String, body: String) {
+        notify(title: title, body: body, template: "red")
+    }
+
+    /// Convenience: sends an info card (blue header).
+    func notifyInfo(title: String, body: String) {
+        notify(title: title, body: body, template: "blue")
+    }
+
+    // MARK: - Token
 
     private func getTenantAccessToken() -> String? {
         if let cached = cachedToken, cached.expiresAt > Date() {
@@ -91,7 +121,9 @@ class FeishuNotifier {
         return result
     }
 
-    private func sendMessage(token: String, title: String, body: String) {
+    // MARK: - Card Sending
+
+    private func sendInteractiveCard(token: String, title: String, body: String, template: String) {
         guard let url = URL(string: "\(feishuAPI)/open-apis/im/v1/messages?receive_id_type=open_id") else {
             return
         }
@@ -101,21 +133,37 @@ class FeishuNotifier {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        let card: [String: Any] = [
+            "config": ["wide_screen_mode": true],
+            "header": [
+                "title": ["tag": "plain_text", "content": title],
+                "template": template
+            ],
+            "elements": [
+                ["tag": "markdown", "content": body]
+            ]
+        ]
+
+        guard let cardJSON = try? JSONSerialization.data(withJSONObject: card),
+              let cardString = String(data: cardJSON, encoding: .utf8) else {
+            return
+        }
+
         let messageContent: [String: Any] = [
             "receive_id": creds.userOpenId,
-            "msg_type": "text",
-            "content": ["text": "【Guardian 告警】\n\(title)\n\n\(body)"]
+            "msg_type": "interactive",
+            "content": cardString
         ]
 
         request.httpBody = try? JSONSerialization.data(withJSONObject: messageContent)
 
         let task = URLSession.shared.dataTask(with: request) { _, response, error in
             if let error = error {
-                print("[Feishu] Send failed: \(error.localizedDescription)")
+                print("[Feishu] Card send failed: \(error.localizedDescription)")
                 return
             }
             if let httpResponse = response as? HTTPURLResponse {
-                print("[Feishu] Send result: \(httpResponse.statusCode)")
+                print("[Feishu] Card send result: \(httpResponse.statusCode)")
             }
         }
         task.resume()

@@ -6,7 +6,7 @@ enum AIActivity: String {
     case stuck = "卡住了"
 }
 
-/// Detects AI activity from gateway.log.
+/// Detects AI activity from gateway.log using FSEvents (event-driven) + periodic stuck-check.
 ///
 /// Real signals:
 ///   "[plugins] agent_end"  → AI finished processing (NOT inside tool call params)
@@ -34,7 +34,14 @@ class BackgroundMonitor: ObservableObject {
     private var lastKnownDispatch: Date?
     private var dispatchArrivedAfterEnd: Bool = false
 
-    private var timer: Timer?
+    // MARK: - FSEvents (replaces fixed 3-second polling)
+    private var fileMonitorSource: DispatchSourceFileSystemObject?
+    private var monitoredFileHandle: FileHandle?
+    private var monitoredFileDescriptor: Int32 = -1
+
+    // MARK: - Periodic stuck-check timer (still needed since FSEvents only fires on file changes)
+    private var stuckTimer: Timer?
+
     private let logPath: String
 
     init() {
@@ -43,18 +50,102 @@ class BackgroundMonitor: ObservableObject {
     }
 
     func start() {
-        timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.throttledRefresh()
+        stop()
+
+        // FSEvents: watch log file for changes, trigger re-scan on write activity
+        setupFileMonitor()
+
+        // Periodic stuck-check: catches cases where log hasn't changed but AI is stuck
+        // Run every 30 seconds — much cheaper than 3-second polling
+        stuckTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.checkStuck()
         }
-        RunLoop.main.add(timer!, forMode: .common)
+        RunLoop.main.add(stuckTimer!, forMode: .common)
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        stuckTimer?.invalidate()
+        stuckTimer = nil
+
+        fileMonitorSource?.cancel()
+        fileMonitorSource = nil
+
+        try? monitoredFileHandle?.close()
+        monitoredFileHandle = nil
+        monitoredFileDescriptor = -1
     }
 
-    /// Skip refresh if called within 1.5s of last call (debounce tab switching etc.)
+    // MARK: - FSEvents file monitoring
+
+    /// Sets up DispatchSource.makeFileSystemObject to watch the log file.
+    /// Triggers a debounced re-scan whenever the file is written to.
+    private func setupFileMonitor() {
+        guard FileManager.default.fileExists(atPath: logPath) else { return }
+
+        // Open file for reading (watching writable events requires write descriptor, simpler to
+        // watch the file's modification time via a read handle and re-check on any activity)
+        do {
+            let url = URL(fileURLWithPath: logPath)
+            monitoredFileHandle = try FileHandle(forReadingFrom: url)
+            monitoredFileDescriptor = monitoredFileHandle!.fileDescriptor
+        } catch {
+            print("[BackgroundMonitor] Could not open log file for monitoring: \(error)")
+            return
+        }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: monitoredFileDescriptor,
+            eventMask: [.write, .extend, .delete, .rename],
+            queue: DispatchQueue.global(qos: .utility)
+        )
+
+        source.setEventHandler { [weak self] in
+            // File was modified — trigger debounced scan
+            self?.throttledRefresh()
+        }
+
+        source.setCancelHandler { [weak self] in
+            try? self?.monitoredFileHandle?.close()
+            self?.monitoredFileHandle = nil
+            self?.monitoredFileDescriptor = -1
+        }
+
+        fileMonitorSource = source
+        source.resume()
+    }
+
+    /// Checks if AI is stuck even without log changes (periodic 30s check)
+    private func checkStuck() {
+        let now = Date()
+
+        guard let dispatchDate = lastKnownDispatch else {
+            // No dispatch at all → idle
+            DispatchQueue.main.async {
+                if self.activity != .idle {
+                    self.activity = .idle
+                    self.idleMinutes = 0
+                    self.lastUpdate = now
+                }
+            }
+            return
+        }
+
+        let dispatchAgeSecs = Int(now.timeIntervalSince(dispatchDate))
+        guard dispatchAgeSecs >= 120 else { return }  // Not stuck yet
+
+        guard let toolCallDate = lastKnownAgentEnd else {
+            // No agent_end after dispatch → stuck
+            setUI(activity: .stuck, endedAt: lastEndedAt, toolAt: lastToolCallAt, dispatchAt: lastDispatchAt, idleMins: dispatchAgeSecs / 60)
+            return
+        }
+
+        // If last agent_end is older than 2min from dispatch and no new work → stuck
+        if toolCallDate < dispatchDate.addingTimeInterval(120) {
+            setUI(activity: .stuck, endedAt: lastEndedAt, toolAt: lastToolCallAt, dispatchAt: lastDispatchAt, idleMins: dispatchAgeSecs / 60)
+        }
+    }
+
+    /// Skip refresh if called within 1.5s of last call (debounce rapid log writes)
     private func throttledRefresh() {
         let now = Date()
         guard now.timeIntervalSince(lastRefresh) >= 1.5 else { return }

@@ -31,7 +31,7 @@ class SelfChecker {
     func runAllChecks() -> [CheckResult] {
         return [
             checkGateway(),
-            checkDocker(),
+            checkGatewayStatus(),
             checkMemoryFiles(),
             checkSkillIntegrity(),
             checkCronJobs(),
@@ -58,20 +58,29 @@ class SelfChecker {
         return CheckResult(name: "Gateway", status: .ok, message: "健康")
     }
 
-    private func checkDocker() -> CheckResult {
+    /// Checks openclaw gateway status via CLI (replaces Docker check — Gateway is a native node app, not Docker)
+    private func checkGatewayStatus() -> CheckResult {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/local/bin/docker")
-        task.arguments = ["info"]
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = ["-c", "/opt/homebrew/bin/openclaw gateway status 2>&1"]
         let pipe = Pipe()
         task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
+        task.standardError = pipe
         try? task.run()
         task.waitUntilExit()
-        let exitCode = task.terminationStatus
-        if exitCode == 0 {
-            return CheckResult(name: "Docker", status: .ok, message: "正常运行")
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return CheckResult(name: "Gateway CLI", status: .warning, message: "无法读取状态")
+        }
+
+        let lower = output.lowercased()
+        if lower.contains("running") || lower.contains("active") || lower.contains("started") {
+            return CheckResult(name: "Gateway CLI", status: .ok, message: output.isEmpty ? "运行中" : output)
+        } else if lower.contains("stopped") || lower.contains("dead") || lower.contains("failed") {
+            return CheckResult(name: "Gateway CLI", status: .error, message: output.isEmpty ? "已停止" : output)
         } else {
-            return CheckResult(name: "Docker", status: .warning, message: "未安装/未运行")
+            return CheckResult(name: "Gateway CLI", status: .warning, message: output.isEmpty ? "状态未知" : output)
         }
     }
 

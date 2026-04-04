@@ -25,6 +25,9 @@ class MonitorService: ObservableObject {
     private let healthChecker = HealthChecker()
     private let fixExecutor = FixExecutor()
     private let feishuNotifier = FeishuNotifier()
+    private let diagnosisEngine = DiagnosisEngine()
+    private let fixRouter = FixRouter()
+    private let db = DatabaseService.shared
 
     var onStatusChange: ((HealthStatus) -> Void)?
 
@@ -32,6 +35,9 @@ class MonitorService: ObservableObject {
 
     func start() {
         isMonitoring = true
+        // Clean up old DB records (7-day retention)
+        db.cleanupOldData(days: 7)
+        db.recordSystemEvent(eventType: "guardian_started", message: "Guardian started")
         startLogWatching()
         startHealthCheck()
         startUptimeCheck()
@@ -40,6 +46,7 @@ class MonitorService: ObservableObject {
 
     func stop() {
         isMonitoring = false
+        db.recordSystemEvent(eventType: "guardian_stopped", message: "Guardian stopped")
         logWatcher?.stop()
         healthTimer?.invalidate()
         uptimeTimer?.invalidate()
@@ -144,26 +151,60 @@ class MonitorService: ObservableObject {
     }
 
     private func checkHealth() async {
-        let result = await healthChecker.check()
+        let result = await healthChecker.checkWithModelValidation()
         await MainActor.run {
             let newStatus: HealthStatus
-            switch result {
-            case .healthy:
-                newStatus = .healthy
-            case .unhealthy:
+            let statusStr: String
+
+            if result.hasConfigMismatch {
+                // Model config cleared while Gateway still runs — more severe than crash
                 newStatus = .critical
-            case .unknown:
-                newStatus = .unknown
+                statusStr = "config_mismatch"
+            } else {
+                switch result.level {
+                case .healthy:
+                    newStatus = .healthy
+                    statusStr = "healthy"
+                case .unhealthy:
+                    newStatus = .critical
+                    statusStr = "unhealthy"
+                case .unknown:
+                    newStatus = .unknown
+                    statusStr = "unknown"
+                }
             }
+
+            // Build error message for mismatches
+            let errorMsg: String
+            if result.hasConfigMismatch {
+                errorMsg = "模型配置异常：声明了 \(result.configuredModelsCount) 个模型但加载了 \(result.modelsCount) 个"
+            } else {
+                errorMsg = ""
+            }
+
+            // Record to SQLite
+            self.db.recordHealthCheck(
+                status: statusStr,
+                responseTimeMs: 0,
+                cpuUsage: 0,
+                memUsage: 0,
+                errorMsg: errorMsg
+            )
 
             if newStatus != self.status {
                 let oldStatus = self.status
                 self.status = newStatus
                 self.onStatusChange?(newStatus)
 
-                // Send Feishu notification if went critical
+                // Send Feishu notification if became critical
                 if oldStatus != .critical && newStatus == .critical {
-                    self.sendCriticalNotification()
+                    if result.hasConfigMismatch {
+                        self.sendCriticalNotification(
+                            message: "模型配置异常：声明了 \(result.configuredModelsCount) 个模型但加载了 \(result.modelsCount) 个"
+                        )
+                    } else {
+                        self.sendCriticalNotification(message: "Gateway 状态异常，进程可能已崩溃")
+                    }
                 }
             }
         }
@@ -209,75 +250,107 @@ class MonitorService: ObservableObject {
         }
     }
 
-    /// 基于智能分类评估状态（核心改进点）
+    /// 基于智能分类 + 诊断引擎评估状态（Self-Healing 核心）
+    /// 流程：诊断 → 路由修复 → 验证
     private func evaluateStatusForCategory(_ event: LogEvent, category: ErrorCategory) {
         // 如果已经是 critical 状态，不被低级错误降级
         if status == .critical && category != .gatewayCrash && category != .gatewayUnhealthy {
             return
         }
 
-        switch category {
-        case .gatewayCrash:
-            // Gateway 崩溃 → critical + 自动修复
-            status = .critical
-            onStatusChange?(.critical)
-            Task {
-                let result = await fixExecutor.fixGateway()
-                await MainActor.run {
-                    recentFixes.insert(result, at: 0)
-                    if recentFixes.count > 20 { recentFixes.removeLast() }
-                    updateRateLimitStatus()
+        // 只处理需要关注的错误类别
+        guard category != .normal else { return }
+
+        // 收集最近 20 条相关日志作为证据
+        let evidenceLines = recentEvents
+            .filter { $0.category == category }
+            .prefix(20)
+            .map { $0.rawLine }
+
+        // Step 1: 诊断 — 分析错误原因和推荐修复动作
+        let diagnosis = diagnosisEngine.diagnose(category: category, logLines: evidenceLines)
+
+        // 记录诊断结果（可从 UI 查看）
+        let diagnosisSummary = "[\(category.rawValue)] \(diagnosis.cause) | 置信度: \(Int(diagnosis.confidence * 100))% | 动作: \(diagnosis.fixAction.description)"
+        print("[Guardian] \(diagnosisSummary)")
+
+        // Step 2: 路由执行 — 根据诊断结果执行对应修复
+        Task {
+            let fixResult = await fixRouter.executeFix(diagnosis: diagnosis)
+
+            await MainActor.run {
+                // 记录修复结果（包装为 HealthStatus.FixResult 用于 UI 显示）
+                let fullResult = FixResult(
+                    action: "\(diagnosis.category.rawValue): \(fixResult.action)",
+                    success: fixResult.success,
+                    output: "诊断: \(diagnosis.cause)\n---\n\(fixResult.output)"
+                )
+
+                recentFixes.insert(fullResult, at: 0)
+                if recentFixes.count > 20 { recentFixes.removeLast() }
+                updateRateLimitStatus()
+
+                // Step 3: 根据验证结果更新状态
+                switch diagnosis.fixAction {
+                case .doNothing, .waitAndRetry:
+                    // 自动恢复，不降级状态
+                    break
+
+                case .notifyAuthError, .logAndAlert:
+                    // 通知类，保持当前状态但记录告警
+                    if status == .healthy {
+                        status = .warning
+                        onStatusChange?(.warning)
+                    }
+
+                case .waitAndRetry:
+                    break
+
+                default:
+                    // 所有需要重启/修复的：验证成功 → healthy，失败 → critical
+                    if fixResult.verified {
+                        status = .healthy
+                        onStatusChange?(.healthy)
+                    } else {
+                        status = .critical
+                        onStatusChange?(.critical)
+                    }
                 }
             }
+        }
 
-        case .gatewayUnhealthy:
+        // 立即更新状态（让 UI 即时反馈）
+        switch category {
+        case .gatewayCrash, .gatewayUnhealthy:
             status = .critical
             onStatusChange?(.critical)
-
-        case .authError:
-            // 认证错误 → warning，不重启，通知用户
+        case .authError, .rateLimit, .overloaded, .pluginError, .networkError:
             if status == .healthy {
                 status = .warning
                 onStatusChange?(.warning)
             }
-
-        case .rateLimit, .overloaded:
-            // 限流/过载 → warning，不重启
-            if status == .healthy {
-                status = .warning
-                onStatusChange?(.warning)
-            }
-
-        case .pluginError:
-            // 插件错误 → warning，不重启（Gateway 本身还活着）
-            if status == .healthy {
-                status = .warning
-                onStatusChange?(.warning)
-            }
-
-        case .networkError:
-            // 网络错误 → warning，不重启
-            if status == .healthy {
-                status = .warning
-                onStatusChange?(.warning)
-            }
-
         case .warning:
             if status == .healthy {
                 status = .warning
                 onStatusChange?(.warning)
             }
-
         case .normal:
             break
         }
     }
 
-    private func sendCriticalNotification() {
+    private func sendCriticalNotification(message: String) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         feishuNotifier.notify(
             title: "⚠️ OpenClaw Guardian 检测到故障",
-            body: "时间：\(timestamp)\nGateway 状态异常，Guardian 正在尝试自动修复。\n请查看 Guardian Menu Bar 了解详情。"
+            body: """
+            **时间：** \(timestamp)
+
+            **故障原因：** \(message)
+
+            Guardian 正在尝试自动修复。请查看 Menu Bar 了解详情。
+            """,
+            template: "red"
         )
     }
 }

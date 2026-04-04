@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$PROJECT_DIR/.build"
 BIN="$BUILD_DIR/openclaw-guardian"
@@ -11,31 +10,28 @@ mkdir -p "$BUILD_DIR"
 
 echo "📦 Compiling OpenClaw Guardian..."
 
-swiftc -o "$BIN" \
-  -sdk "$SDK" \
-  -target arm64-apple-macosx26.0 \
-  -Xlinker -syslibroot -Xlinker "$SDK" \
-  -framework AppKit \
-  -framework SwiftUI \
-  -framework Foundation \
-  "$PROJECT_DIR/Sources/Models/HealthStatus.swift" \
-  "$PROJECT_DIR/Sources/Models/ErrorClassifier.swift" \
-  "$PROJECT_DIR/Sources/Services/LogWatcher.swift" \
-  "$PROJECT_DIR/Sources/Services/HealthChecker.swift" \
-  "$PROJECT_DIR/Sources/Services/FixExecutor.swift" \
-  "$PROJECT_DIR/Sources/Services/MonitorService.swift" \
-  "$PROJECT_DIR/Sources/Services/SelfChecker.swift" \
-  "$PROJECT_DIR/Sources/Services/FeishuNotifier.swift" \
-  "$PROJECT_DIR/Sources/Services/BackgroundMonitor.swift" \
-  "$PROJECT_DIR/Sources/Views/StatusBarView.swift" \
-  "$PROJECT_DIR/Sources/App/AppDelegate.swift" \
-  "$PROJECT_DIR/Sources/App/main.swift"
+# Use swift build instead of direct swiftc (handles SQLite.swift dependency)
+cd "$PROJECT_DIR"
+swift build -c release
 
-echo "✅ Built: $BIN"
+# Find the built binary
+if [ -f "$BUILD_DIR/openclaw-guardian" ]; then
+    BUILT_BIN="$BUILD_DIR/openclaw-guardian"
+else
+    # Find in release directory
+    BUILT_BIN=$(find "$BUILD_DIR" -name "openclaw-guardian" -type f 2>/dev/null | head -1)
+fi
+
+if [ -z "$BUILT_BIN" ]; then
+    echo "❌ Failed to find built binary"
+    exit 1
+fi
+
+echo "✅ Built: $BUILT_BIN"
 
 # Install to Applications
 mkdir -p "$APP/Contents/MacOS"
-cp "$BIN" "$APP/Contents/MacOS/"
+cp "$BUILT_BIN" "$APP/Contents/MacOS/"
 chmod +x "$APP/Contents/MacOS/openclaw-guardian"
 echo "✅ Installed to $APP"
 
