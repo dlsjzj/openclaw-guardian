@@ -153,8 +153,8 @@ class MonitorService: ObservableObject {
     private func checkHealth() async {
         let result = await healthChecker.checkWithModelValidation()
         await MainActor.run {
-            let newStatus: HealthStatus
-            let statusStr: String
+            var newStatus: HealthStatus
+            var statusStr: String
 
             if result.hasConfigMismatch {
                 // Model config cleared while Gateway still runs — more severe than crash
@@ -175,11 +175,20 @@ class MonitorService: ObservableObject {
             }
 
             // Build error message for mismatches
-            let errorMsg: String
+            var errorMsg: String
             if result.hasConfigMismatch {
                 errorMsg = "模型配置异常：声明了 \(result.configuredModelsCount) 个模型但加载了 \(result.modelsCount) 个"
             } else {
                 errorMsg = ""
+            }
+
+            // Check disk space (only when health is otherwise good)
+            var diskWarning = false
+            if newStatus == .healthy && healthChecker.isDiskSpaceLow() {
+                newStatus = .warning
+                statusStr = "disk_space_low"
+                diskWarning = true
+                errorMsg = "磁盘空间已超过 90%"
             }
 
             // Record to SQLite
@@ -205,6 +214,11 @@ class MonitorService: ObservableObject {
                     } else {
                         self.sendCriticalNotification(message: "Gateway 状态异常，进程可能已崩溃")
                     }
+                }
+                
+                // Send warning notification for disk space
+                if oldStatus == .healthy && diskWarning {
+                    self.sendWarningNotification(message: "磁盘空间已超过 90%，请清理")
                 }
             }
         }
@@ -351,6 +365,21 @@ class MonitorService: ObservableObject {
             Guardian 正在尝试自动修复。请查看 Menu Bar 了解详情。
             """,
             template: "red"
+        )
+    }
+    
+    private func sendWarningNotification(message: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        feishuNotifier.notify(
+            title: "⚡ OpenClaw Guardian 警告",
+            body: """
+            **时间：** \(timestamp)
+
+            **警告原因：** \(message)
+
+            请及时处理以避免影响 Gateway 运行。
+            """,
+            template: "blue"
         )
     }
 }

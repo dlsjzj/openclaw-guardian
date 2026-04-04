@@ -19,6 +19,7 @@ class HealthChecker {
     // MARK: - Process alive check
 
     /// Checks if the gateway process is running (using lsof to check port 18789)
+    /// Also verifies that the process is openclaw (not some other process on the same port)
     func isProcessAlive() -> Bool {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
@@ -32,8 +33,49 @@ class HealthChecker {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         guard let output = String(data: data, encoding: .utf8) else { return false }
 
-        // lsof output contains "LISTEN" when port is in use
-        return output.contains("LISTEN")
+        // Must contain LISTEN and "openclaw"
+        let hasListen = output.contains("LISTEN")
+        let hasOpenclaw = output.contains("openclaw")
+
+        if hasListen && hasOpenclaw {
+            return true
+        } else if hasListen && !hasOpenclaw {
+            // Port is occupied by something else — this is a problem!
+            print("[HealthChecker] WARNING: Port 18789 occupied by non-openclaw process")
+            return false
+        }
+        return false
+    }
+
+    /// Checks if disk space is below threshold (90%)
+    func isDiskSpaceLow() -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/df")
+        task.arguments = ["-h", "/"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else { return false }
+
+        // Parse "87%" from "Filesystem   Size  Used Avail Use% Mounted on ... /dev/disk1s1  500G  435G   65G  87% /"
+        let lines = output.split(separator: "\n")
+        for line in lines {
+            if line.contains("/") && !line.contains("Filesystem") {
+                let useIndex = line.lastIndex(of: "%")
+                if let useIndex = useIndex {
+                    let start = line.index(useIndex, offsetBy: -2, limitedBy: line.startIndex) ?? line.startIndex
+                    let percentStr = String(line[start..<useIndex]).trimmingCharacters(in: .whitespaces)
+                    if let percent = Int(percentStr), percent >= 90 {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
     }
 
     // MARK: - Basic health check (process alive)
