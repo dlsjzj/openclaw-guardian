@@ -6,7 +6,23 @@ import CryptoKit
 /// Executes Gateway self-healing with validated backup, MD5 dedup,
 /// fault diagnosis reporting, and SQLite audit logging.
 class FixExecutor {
-    private let openclawBin = "/opt/homebrew/bin/openclaw"
+    // Fix: dynamically find openclaw binary instead of hardcoded Homebrew path
+    private var openclawBin: String {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        task.arguments = ["openclaw"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+        return "/opt/homebrew/bin/openclaw"  // fallback
+    }
     private let configPath  = NSHomeDirectory() + "/.openclaw/openclaw.json"
     private let backupDir   = NSHomeDirectory() + "/.openclaw/backups"
     private let reportDir   = NSHomeDirectory() + "/.openclaw/workspace-zhongshu/projects/openclaw-guardian/reports"
@@ -25,12 +41,21 @@ class FixExecutor {
     private var lastFixTime: Date?
     private var isRateLimited: Bool = false
 
+    // MARK: - Three-Level Fix Escalation
+    // Level 1: Simple restart
+    // Level 2: Force restart (kill existing process before start)
+    // Level 3: Restore from backup
+    private var fixEscalationLevel: Int = 0
+    private let maxEscalationLevel: Int = 2  // 0, 1, 2 = 3 levels
+
     // MARK: - Exponential Backoff
     // backoffMultiplier: 1x → 2x → 4x → 8x (capped), resets on success
     private var backoffMultiplier: Double = 1.0
     private var consecutiveFailures: Int = 0
     private let maxBackoffMultiplier: Double = 8.0  // 8x * 300s = 40min cap (uses 30min hard cap in cooldown calc)
     private let alertAfterConsecutiveFailures: Int = 2
+    private var lastNotifyTime: Date?
+    private let notifyCooldownInterval: TimeInterval = 300  // 5 minutes between repeat notifications
 
     private let db = DatabaseService.shared
 
@@ -103,17 +128,160 @@ class FixExecutor {
             return await restartGatewayProcess()
         }
 
-        // Step 2: Process is alive but health check failed → use original restart logic (config issue)
+        // Step 2: Process is alive but health check failed → use three-level escalation
         let level = await healthChecker.check()
 
         switch level {
         case .healthy:
+            fixEscalationLevel = 0  // Reset escalation on success
             return FixResult(action: "健康检查", success: true, output: "Gateway 运行正常，无需修复")
-        case .unhealthy:
-            return await restartGateway(reason: "unhealthy (health check failed)")
-        case .unknown:
-            return await restartGateway(reason: "unknown status")
+        case .unhealthy, .unknown:
+            // Use three-level escalation based on current level
+            return await fixGatewayWithEscalation(reason: "\(level)")
         }
+    }
+
+    // MARK: - Three-Level Fix Escalation
+
+    /// Executes fix with three-level escalation:
+    /// - Level 0: Simple restart (openclaw gateway restart)
+    /// - Level 1: Force restart (kill existing process then restart)
+    /// - Level 2: Restore from backup
+    private func fixGatewayWithEscalation(reason: String) async -> FixResult {
+        print("[FixExecutor] fixGatewayWithEscalation: level=\(fixEscalationLevel), reason=\(reason)")
+
+        switch fixEscalationLevel {
+        case 0:
+            // Level 1: Simple restart
+            let result = await restartGateway(reason: reason)
+            if result.success {
+                fixEscalationLevel = 0  // Reset on success
+            } else {
+                fixEscalationLevel = 1  // Escalate to force restart
+            }
+            return result
+
+        case 1:
+            // Level 2: Force restart (kill then restart)
+            let result = await restartGatewayForce(reason: reason)
+            if result.success {
+                fixEscalationLevel = 0  // Reset on success
+            } else {
+                fixEscalationLevel = 2  // Escalate to restore from backup
+            }
+            return result
+
+        default:
+            // Level 3: Restore from backup (maxEscalationLevel = 2)
+            if fixEscalationLevel >= maxEscalationLevel {
+                print("[FixExecutor] Max escalation reached, attempting restore from backup...")
+                let restoreResult = await restoreFromBackup()
+                if restoreResult.success {
+                    fixEscalationLevel = 0  // Reset on success
+                    return restoreResult
+                } else {
+                    // Restore failed, stay at max level and try force restart as fallback
+                    fixEscalationLevel = 1
+                    return await restartGatewayForce(reason: "\(reason) (restore failed fallback)")
+                }
+            }
+            // Fallback to force restart
+            fixEscalationLevel = 1
+            return await restartGatewayForce(reason: reason)
+        }
+    }
+
+    /// Force restarts gateway by killing existing process first, then starting fresh.
+    private func restartGatewayForce(reason: String) async -> FixResult {
+        print("[FixExecutor] Force restarting gateway (kill existing process first)...")
+
+        // Find and kill existing process on port 18789
+        let lsofTask = Process()
+        lsofTask.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        lsofTask.arguments = ["-t", "-i", ":18789"]
+        let pipe = Pipe()
+        lsofTask.standardOutput = pipe
+        lsofTask.standardError = FileHandle.nullDevice
+        try? lsofTask.run()
+        lsofTask.waitUntilExit()
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        if let pidStr = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let pid = Int(pidStr) {
+            let killTask = Process()
+            killTask.executableURL = URL(fileURLWithPath: "/bin/kill")
+            killTask.arguments = ["-9", "\(pid)"]
+            try? killTask.run()
+            print("[FixExecutor] Killed existing process \(pid)")
+            sleep(1)  // Wait for process to terminate
+        }
+
+        // Now restart gateway fresh
+        return await restartGateway(reason: reason + " (force)")
+    }
+
+    /// Restores configuration from the most recent backup.
+    func restoreFromBackup() async -> FixResult {
+        print("[FixExecutor] Restoring from backup...")
+
+        // Find the most recent backup
+        let backupURL = URL(fileURLWithPath: backupDir)
+        let fileManager = FileManager.default
+
+        guard let files = try? fileManager.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: [.creationDateKey]) else {
+            return FixResult(
+                action: "恢复备份",
+                success: false,
+                output: "无法读取备份目录"
+            )
+        }
+
+        let sorted = files
+            .filter { $0.pathExtension == "bak" }
+            .sorted { f1, f2 in
+                let d1 = (try? f1.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? Date.distantPast
+                let d2 = (try? f2.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? Date.distantPast
+                return d1 > d2
+            }
+
+        guard let latest = sorted.first else {
+            return FixResult(
+                action: "恢复备份",
+                success: false,
+                output: "未找到备份文件"
+            )
+        }
+
+        let targetURL = URL(fileURLWithPath: configPath)
+
+        do {
+            // Copy backup to config
+            try fileManager.copyItem(at: latest, to: targetURL)
+            print("[FixExecutor] Restored config from: \(latest.lastPathComponent)")
+
+            // Record the backup restore event
+            db.recordSystemEvent(eventType: "config_restore", message: "Restored from \(latest.lastPathComponent)")
+
+            // Restart gateway after restore
+            let restartResult = await restartGatewayProcess()
+            return FixResult(
+                action: "恢复备份并重启",
+                success: restartResult.success,
+                output: "已从 \(latest.lastPathComponent) 恢复配置。\(restartResult.output)"
+            )
+        } catch {
+            return FixResult(
+                action: "恢复备份",
+                success: false,
+                output: "恢复失败: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// Resets escalation level (called when user manually triggers fix)
+    func resetEscalation() {
+        fixEscalationLevel = 0
+        print("[FixExecutor] Escalation level reset to 0")
     }
 
     // MARK: - Restart
@@ -273,14 +441,23 @@ class FixExecutor {
             backoffMultiplier = min(backoffMultiplier * 2, maxBackoffMultiplier)
             db.recordSystemEvent(eventType: "heal_failed", message: reason)
 
-            // Alert user via Feishu after 2 consecutive failures
+            // P0-2 Fix: 每次连续失败 >= 2 且冷却已过都通知，不只是第2次
             if consecutiveFailures >= alertAfterConsecutiveFailures {
-                let feishuNotifier = FeishuNotifier()
-                feishuNotifier.notifyError(
-                    title: "🚨 Guardian 修复连续失败",
-                    body: "Gateway 已连续失败 **\(consecutiveFailures) 次**，当前退避倍数：**\(Int(backoffMultiplier))x**（等待 \(Int(min(rateLimitWindow * backoffMultiplier, 1800) / 60)) 分钟）\n\n最近失败原因：\(reason)"
-                )
-                outputLines.append("🚨 已发送飞书告警通知（连续 \(consecutiveFailures) 次失败）")
+                let now = Date()
+                let cooldownElapsed = lastNotifyTime == nil ||
+                    now.timeIntervalSince(lastNotifyTime!) > notifyCooldownInterval
+                if cooldownElapsed {
+                    let feishuNotifier = FeishuNotifier()
+                    feishuNotifier.notifyError(
+                        title: "🚨 Guardian 修复连续失败",
+                        body: "Gateway 已连续失败 **\(consecutiveFailures) 次**，当前退避倍数：**\(Int(backoffMultiplier))x**（等待 \(Int(min(rateLimitWindow * backoffMultiplier, 1800) / 60)) 分钟）\n\n最近失败原因：\(reason)"
+                    )
+                    lastNotifyTime = now
+                    outputLines.append("🚨 已发送飞书告警通知（连续 \(consecutiveFailures) 次失败）")
+                } else {
+                    let remaining = Int(notifyCooldownInterval - now.timeIntervalSince(lastNotifyTime!))
+                    outputLines.append("⏳ 连续失败 \(consecutiveFailures) 次（通知冷却中，还剩 \(remaining)s）")
+                }
             }
         } else {
             // Reset on success

@@ -32,6 +32,9 @@ enum FixAction: Equatable {
     /// Unknown error — attempt Gateway restart as last resort
     case restartGatewayFallback(reason: String)
 
+    /// Restore configuration from backup after multiple failures
+    case restoreBackup(reason: String)
+
     /// Description for display
     var description: String {
         switch self {
@@ -44,6 +47,7 @@ enum FixAction: Equatable {
         case .restartGatewayPlugin(let r):  return "重启Gateway(插件): \(r)"
         case .logAndAlert(let r, _):       return "记录并告警: \(r)"
         case .restartGatewayFallback(let r):return "重启Gateway(兜底): \(r)"
+        case .restoreBackup(let r):        return "恢复备份: \(r)"
         }
     }
 
@@ -51,7 +55,7 @@ enum FixAction: Equatable {
     var requiresRestart: Bool {
         switch self {
         case .killPortProcess, .rollbackConfig, .restoreModels,
-             .restartGatewayPlugin, .restartGatewayFallback:
+             .restartGatewayPlugin, .restartGatewayFallback, .restoreBackup:
             return true
         case .doNothing, .waitAndRetry, .notifyAuthError, .logAndAlert:
             return false
@@ -461,6 +465,19 @@ class FixRouter {
             let result = await restartGateway(reason: reason)
             db.recordDiagnosisEvent(diagnosis: diagnosis, fixResult: result)
             return result
+
+        case .restoreBackup(_):
+            // Use FixExecutor's restoreFromBackup through the FixExecutor class
+            let fixExecutor = FixExecutor()
+            let result = await fixExecutor.restoreFromBackup()
+            let diagnosisResult = DiagnosisFixResult(
+                action: result.action,
+                success: result.success,
+                output: result.output,
+                verified: result.success
+            )
+            db.recordDiagnosisEvent(diagnosis: diagnosis, fixResult: diagnosisResult)
+            return diagnosisResult
         }
     }
 
@@ -661,11 +678,57 @@ class FixRouter {
             return DiagnosisFixResult(action: "模型恢复", success: false, output: output, verified: false)
         }
 
-        output += "\n尝试从备份恢复模型配置..."
-        output += "\n备份中的模型信息已记录，将在 Gateway 重启后生效"
-        output += "\n重启 Gateway 以重新加载模型..."
+        output += "\n从备份恢复模型配置: \(latestBackupPath)"
 
-        let restartResult = await restartGateway(reason: "模型配置丢失重启")
+        // Step 1: Read backup config and extract models section
+        guard let backupData = FileManager.default.contents(atPath: latestBackupPath),
+              let backupJSON = try? JSONSerialization.jsonObject(with: backupData) as? [String: Any],
+              let backupModels = backupJSON["models"] as? [[String: Any]] else {
+            output += "\n⚠️ 备份中无 models 配置，通知用户手动恢复"
+            let notifier = FeishuNotifier()
+            notifier.notifyError(
+                title: "🤖 OpenClaw 模型配置丢失",
+                body: "声明了 \(configured) 个模型但加载了 \(loaded) 个，备份中无 models 配置。请手动检查 openclaw.json。"
+            )
+            return DiagnosisFixResult(action: "模型恢复", success: false, output: output, verified: false)
+        }
+
+        output += "\n✅ 备份中包含 \(backupModels.count) 个模型配置"
+
+        // Step 2: Read current config
+        guard FileManager.default.fileExists(atPath: configPath),
+              let currentData = FileManager.default.contents(atPath: configPath),
+              var currentJSON = try? JSONSerialization.jsonObject(with: currentData) as? [String: Any] else {
+            output += "\n❌ 无法读取当前配置文件"
+            return DiagnosisFixResult(action: "模型恢复", success: false, output: output, verified: false)
+        }
+
+        // Step 3: Save current config as error backup
+        let errPath = NSHomeDirectory() + "/.openclaw/openclaw.json.err"
+        try? FileManager.default.copyItem(atPath: configPath, toPath: errPath)
+        output += "\n当前配置已备份至: \(errPath)"
+
+        // Step 4: Replace models section in current config
+        currentJSON["models"] = backupModels
+        output += "\n✅ 已将备份中的 models 配置合并到当前配置"
+
+        // Step 5: Write merged config back
+        guard let mergedData = try? JSONSerialization.data(withJSONObject: currentJSON, options: [.prettyPrinted, .sortedKeys]) else {
+            output += "\n❌ 序列化合并后的配置失败"
+            return DiagnosisFixResult(action: "模型恢复", success: false, output: output, verified: false)
+        }
+        do {
+            try mergedData.write(to: URL(fileURLWithPath: configPath))
+            output += "\n✅ 合并后的配置已写入: \(configPath)"
+        } catch {
+            output += "\n❌ 写入配置失败: \(error.localizedDescription)"
+            return DiagnosisFixResult(action: "模型恢复", success: false, output: output, verified: false)
+        }
+
+        // Step 6: Restart Gateway to reload models
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        output += "\n重启 Gateway 以重新加载模型..."
+        let restartResult = await restartGateway(reason: "模型配置恢复后重启")
         output += "\n" + restartResult.output
 
         if restartResult.verified {

@@ -200,7 +200,19 @@ class DatabaseService {
             try db.run(systemEvents.filter(seTimestamp < cutoff).delete())
             print("[Database] Cleanup done, removed records before \(cutoff)")
         } catch {
+            // P2 Fix: Don't just print to stdout (menu bar app has no visible stdout).
+            // Write the failure to our own SQLite system_events table so it persists.
             print("[Database] cleanupOldData failed: \(error)")
+            do {
+                try db.run(systemEvents.insert(
+                    seTimestamp <- Date(),
+                    seEventType <- "cleanup_failed",
+                    seMessage <- error.localizedDescription
+                ))
+            } catch {
+                // If even writing the failure fails, write to stderr as last resort
+                fputs("[Database] CRITICAL: cleanup failed and could not log to DB: \(error)\n", stderr)
+            }
         }
     }
 

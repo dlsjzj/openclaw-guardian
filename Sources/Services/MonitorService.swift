@@ -7,6 +7,9 @@ class MonitorService: ObservableObject {
     @Published var isMonitoring: Bool = false
     @Published var gatewayUptime: String = "—"
 
+    // MARK: - Unknown status tracking
+    private var unknownCount: Int = 0
+    
     // MARK: - Rate Limit Status
     @Published var fixAttemptsUsed: Int = 0
     @Published var fixAttemptsMax: Int = 3
@@ -61,6 +64,9 @@ class MonitorService: ObservableObject {
     }
 
     func forceFixNow() {
+        // Reset escalation level on manual intervention
+        fixExecutor.resetEscalation()
+        
         Task {
             let result = await fixExecutor.fixGateway()
             await MainActor.run {
@@ -171,6 +177,13 @@ class MonitorService: ObservableObject {
                 case .unknown:
                     newStatus = .unknown
                     statusStr = "unknown"
+                    unknownCount += 1
+                    if unknownCount >= 3 {
+                        unknownCount = 0
+                        print("[MonitorService] Unknown status 3 times, treating as unhealthy")
+                        newStatus = .critical
+                        statusStr = "unknown_3_times"
+                    }
                 }
             }
 
@@ -204,7 +217,12 @@ class MonitorService: ObservableObject {
                 let oldStatus = self.status
                 self.status = newStatus
                 self.onStatusChange?(newStatus)
-
+                
+                // Reset unknown count when status is known
+                if newStatus == .healthy || newStatus == .warning {
+                    unknownCount = 0
+                }
+                
                 // Send Feishu notification if became critical
                 if oldStatus != .critical && newStatus == .critical {
                     if result.hasConfigMismatch {
@@ -214,6 +232,11 @@ class MonitorService: ObservableObject {
                     } else {
                         self.sendCriticalNotification(message: "Gateway 状态异常，进程可能已崩溃")
                     }
+                }
+                
+                // Send recovery notification when status recovered from critical/unhealthy to healthy
+                if (oldStatus == .critical || oldStatus == .warning) && newStatus == .healthy {
+                    self.sendRecoveryNotification()
                 }
                 
                 // Send warning notification for disk space
@@ -226,9 +249,11 @@ class MonitorService: ObservableObject {
 
     private func updateUptime() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            // P2 Fix: Removed invalid `-c` flag which caused uptime to always show "—"
+            // macOS ps -c is for command name matching, not etime. Use `-o pid,etime=` to get elapsed time.
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/bin/ps")
-            task.arguments = ["-ax", "-o", "pid,etime=", "-c"]
+            task.arguments = ["-ax", "-o", "pid,etime="]
             let pipe = Pipe()
             task.standardOutput = pipe
             task.standardError = FileHandle.nullDevice
@@ -247,9 +272,9 @@ class MonitorService: ObservableObject {
                     .components(separatedBy: .whitespaces)
                     .filter { !$0.isEmpty }
                 if parts.count >= 2 {
-                    let etime = parts.last ?? ""
-                    let pid = parts.first ?? ""
-                    if let pidNum = Int(pid), pidNum > 0 {
+                    let pidStr = parts[0]
+                    let etime = parts[1]
+                    if let pidNum = Int(pidStr), pidNum > 0 {
                         DispatchQueue.main.async {
                             self?.gatewayUptime = etime
                         }
@@ -380,6 +405,21 @@ class MonitorService: ObservableObject {
             请及时处理以避免影响 Gateway 运行。
             """,
             template: "blue"
+        )
+    }
+    
+    private func sendRecoveryNotification() {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        feishuNotifier.notify(
+            title: "✅ Gateway 已恢复",
+            body: """
+            **时间：** \(timestamp)
+
+            Gateway 已自动恢复正常运行。
+            
+            当前状态：健康
+            """,
+            template: "green"
         )
     }
 }

@@ -18,31 +18,55 @@ class HealthChecker {
 
     // MARK: - Process alive check
 
-    /// Checks if the gateway process is running (using lsof to check port 18789)
-    /// Also verifies that the process is openclaw (not some other process on the same port)
+    /// Checks if the gateway process is running on port 18789.
+    /// Uses `lsof -t` + `ps` to get precise pid and verify the binary name,
+    /// avoiding substring-matching false positives from the old "contains(\"openclaw\")" approach.
     func isProcessAlive() -> Bool {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        task.arguments = ["-i", ":18789"]
+        // Step 1: Get the listening PID on port 18789
+        let lsofTask = Process()
+        lsofTask.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        lsofTask.arguments = ["-t", "-i", ":18789"]
         let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-        try? task.run()
-        task.waitUntilExit()
+        lsofTask.standardOutput = pipe
+        lsofTask.standardError = FileHandle.nullDevice
+        try? lsofTask.run()
+        lsofTask.waitUntilExit()
 
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else { return false }
-
-        // Must contain LISTEN and "openclaw"
-        let hasListen = output.contains("LISTEN")
-        let hasOpenclaw = output.contains("openclaw")
-
-        if hasListen && hasOpenclaw {
-            return true
-        } else if hasListen && !hasOpenclaw {
-            // Port is occupied by something else — this is a problem!
-            print("[HealthChecker] WARNING: Port 18789 occupied by non-openclaw process")
+        guard let pidStr = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !pidStr.isEmpty,
+              let pid = Int(pidStr), pid > 0 else {
             return false
+        }
+
+        // Step 2: Verify this PID is actually the openclaw-gateway binary
+        let psTask = Process()
+        psTask.executableURL = URL(fileURLWithPath: "/bin/ps")
+        psTask.arguments = ["-ax", "-o", "pid,comm=", "-p", "\(pid)"]
+        let psPipe = Pipe()
+        psTask.standardOutput = psPipe
+        psTask.standardError = FileHandle.nullDevice
+        try? psTask.run()
+        psTask.waitUntilExit()
+
+        let psData = psPipe.fileHandleForReading.readDataToEndOfFile()
+        guard let psOutput = String(data: psData, encoding: .utf8) else { return false }
+
+        // Parse comm field (second column), skip header line
+        let lines = psOutput.components(separatedBy: "\n")
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            if parts.count >= 2 {
+                let comm = parts[1]
+                if comm == "openclaw-gateway" || comm == "openclaw" {
+                    return true
+                } else {
+                    print("[HealthChecker] WARNING: Port 18789 occupied by non-openclaw process: \(comm)")
+                    return false
+                }
+            }
         }
         return false
     }
@@ -61,10 +85,12 @@ class HealthChecker {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         guard let output = String(data: data, encoding: .utf8) else { return false }
 
-        // Parse "87%" from "Filesystem   Size  Used Avail Use% Mounted on ... /dev/disk1s1  500G  435G   65G  87% /"
+        // Parse root filesystem usage from df output.
+        // Fix: only parse the line actually mounted at "/" (not any /dev or other entries)
         let lines = output.split(separator: "\n")
         for line in lines {
-            if line.contains("/") && !line.contains("Filesystem") {
+            // Only accept the line that has " /" at the end (root mount point)
+            if line.trimmingCharacters(in: .whitespaces).hasSuffix("/") {
                 let useIndex = line.lastIndex(of: "%")
                 if let useIndex = useIndex {
                     let start = line.index(useIndex, offsetBy: -2, limitedBy: line.startIndex) ?? line.startIndex
@@ -73,6 +99,7 @@ class HealthChecker {
                         return true
                     }
                 }
+                break  // Found the root line, stop searching
             }
         }
         return false

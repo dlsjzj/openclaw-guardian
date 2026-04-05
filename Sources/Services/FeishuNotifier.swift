@@ -47,6 +47,10 @@ class FeishuNotifier {
     private let creds: FeishuCredentials
     private let feishuAPI = "https://open.feishu.cn"
     private var cachedToken: (token: String, expiresAt: Date)?
+    
+    // Notification cooldown tracking
+    private var lastNotificationTime: [String: Date] = [:]  // template -> last sent time
+    private let cooldownSeconds: Double = 300  // 5 minutes
 
     init() {
         self.creds = FeishuCredentials()
@@ -60,6 +64,15 @@ class FeishuNotifier {
     ///   - text: Markdown body content
     ///   - template: "red" for errors/warnings, "green" for success, "blue" for info
     func notify(title: String, body: String, template: String = "red") {
+        // Check cooldown
+        if let lastTime = lastNotificationTime[template] {
+            let elapsed = Date().timeIntervalSince(lastTime)
+            if elapsed < cooldownSeconds {
+                print("[FeishuNotifier] Skipping '\(template)' notification (cooldown: \(Int(cooldownSeconds - elapsed))s remaining)")
+                return
+            }
+        }
+        
         guard creds.isConfigured else {
             print("[Feishu] Not configured: missing appId or appSecret")
             return
@@ -69,6 +82,9 @@ class FeishuNotifier {
             return
         }
         sendInteractiveCard(token: token, title: title, body: body, template: template)
+        
+        // Update last sent time
+        lastNotificationTime[template] = Date()
     }
 
     /// Convenience: sends a success card (green header).
@@ -123,7 +139,7 @@ class FeishuNotifier {
 
     // MARK: - Card Sending
 
-    private func sendInteractiveCard(token: String, title: String, body: String, template: String) {
+    private func sendInteractiveCard(token: String, title: String, body: String, template: String, retryOnAuthFailure: Bool = true) {
         guard let url = URL(string: "\(feishuAPI)/open-apis/im/v1/messages?receive_id_type=open_id") else {
             return
         }
@@ -157,13 +173,21 @@ class FeishuNotifier {
 
         request.httpBody = try? JSONSerialization.data(withJSONObject: messageContent)
 
-        let task = URLSession.shared.dataTask(with: request) { _, response, error in
+        // P1-3 Fix: Add retryOnAuthFailure parameter; on 401 clear cache and retry once
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             if let error = error {
                 print("[Feishu] Card send failed: \(error.localizedDescription)")
                 return
             }
             if let httpResponse = response as? HTTPURLResponse {
                 print("[Feishu] Card send result: \(httpResponse.statusCode)")
+                // P1-3: 401 → 清除缓存并重试一次
+                if httpResponse.statusCode == 401, retryOnAuthFailure {
+                    self?.cachedToken = nil
+                    if let newToken = self?.getTenantAccessToken() {
+                        self?.sendInteractiveCard(token: newToken, title: title, body: body, template: template, retryOnAuthFailure: false)
+                    }
+                }
             }
         }
         task.resume()
